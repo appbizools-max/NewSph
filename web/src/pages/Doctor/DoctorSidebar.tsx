@@ -18,7 +18,6 @@ export const DoctorSidebar: React.FC<DoctorSidebarProps> = ({
 }) => {
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'patient_file', label: 'Patient File', icon: FileText },
     { id: 'patient_list', label: 'Patient List', icon: Users },
     ...(isHeadDoctor ? [
       { id: 'packages', label: 'Packages', icon: Package },
@@ -56,7 +55,9 @@ export const DoctorSidebar: React.FC<DoctorSidebarProps> = ({
         <nav style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
           {navItems.map((item) => {
             const Icon = item.icon;
-            const isActive = activeTab === item.id || (activeTab === 'doctor' && item.id === 'dashboard');
+            const isActive = activeTab === item.id ||
+              (activeTab === 'doctor' && item.id === 'dashboard') ||
+              ((activeTab === 'revenue' || activeTab === 'total_revenue') && item.id === 'total_revenue');
             return (
               <button
                 key={item.id}
@@ -85,7 +86,6 @@ export const DoctorSidebar: React.FC<DoctorSidebarProps> = ({
           })}
         </nav>
       </div>
-
       <div style={{ paddingTop: '16px', borderTop: '1px solid #f1f5f9' }}>
         <button
           onClick={handleLogout}

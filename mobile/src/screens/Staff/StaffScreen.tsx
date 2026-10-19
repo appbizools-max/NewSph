@@ -8,13 +8,14 @@ import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import {
-  getSafeDb, collection, query, where, onSnapshot, addDoc, updateDoc, doc, orderBy, getDocs
+  getSafeDb, collection, query, where, onSnapshot, addDoc, updateDoc, doc, orderBy, getDocs, limit
 } from '../../utils/firebaseSafe';
 import { StaffAttendanceRecord, StaffLeaveRequest, StaffDailyReport } from '@app/shared';
 import {
   createStaffDailyReportNotificationInFirestore,
   createStaffPunchInNotificationInFirestore,
   createStaffPunchOutNotificationInFirestore,
+  createStaffLeaveRequestNotificationInFirestore,
   triggerSystemPushNotification
 } from '../../utils/fcmService';
 
@@ -244,84 +245,105 @@ export const StaffScreen: React.FC<StaffScreenProps> = ({
     return () => unsub();
   }, [staffId, staffName, branchName]);
 
-  // 2. Real-time Attendance Listener
+  // 2. Real-time Attendance Listener (Scoped to current staff to prevent WebChannel transport errors)
   useEffect(() => {
     const db = getSafeDb();
     if (!db) return;
 
+    const targetId = staffProfile.id || staffId;
+    const targetName = staffProfile.name || staffName;
+
     try {
       const attRef = collection(db, 'attendance');
-      const q = query(attRef, orderBy('createdAt', 'desc'));
+      const q = targetId
+        ? query(attRef, where('staffId', '==', targetId), limit(40))
+        : query(attRef, limit(40));
+
       const unsub = onSnapshot(q, (snap) => {
         const list: StaffAttendanceRecord[] = [];
         snap.forEach(docSnap => {
           const d = docSnap.data() as any;
-          if (d.staffId === staffProfile.id || d.staffName === staffProfile.name) {
+          if (!targetId || d.staffId === targetId || (targetName && d.staffName === targetName)) {
             list.push({ id: docSnap.id, ...d });
           }
         });
+        list.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
         setAllAttendance(list);
 
         // Check if punched in today
         const todayDoc = list.find(a => a.date === todayStr);
         setTodayAttendance(todayDoc || null);
-      }, (err) => console.warn('Attendance subscription error:', err));
+      }, (err) => console.warn('Attendance subscription notice:', err));
 
       return () => unsub();
     } catch (e) {
-      console.warn('Attendance listener init error:', e);
+      console.warn('Attendance listener init notice:', e);
     }
-  }, [staffProfile.id, staffProfile.name, todayStr]);
+  }, [staffProfile.id, staffProfile.name, staffId, staffName, todayStr]);
 
-  // 3. Real-time Leave Requests Listener
+  // 3. Real-time Leave Requests Listener (Scoped to current staff)
   useEffect(() => {
     const db = getSafeDb();
     if (!db) return;
 
+    const targetId = staffProfile.id || staffId;
+    const targetName = staffProfile.name || staffName;
+
     try {
       const leavesRef = collection(db, 'leaves');
-      const q = query(leavesRef, orderBy('createdAt', 'desc'));
+      const q = targetId
+        ? query(leavesRef, where('staffId', '==', targetId), limit(30))
+        : query(leavesRef, limit(30));
+
       const unsub = onSnapshot(q, (snap) => {
         const list: StaffLeaveRequest[] = [];
         snap.forEach(docSnap => {
           const d = docSnap.data() as any;
-          if (d.staffId === staffProfile.id || d.staffName === staffProfile.name) {
+          if (!targetId || d.staffId === targetId || (targetName && d.staffName === targetName)) {
             list.push({ id: docSnap.id, ...d });
           }
         });
+        list.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
         setMyLeaves(list);
-      }, (err) => console.warn('Leaves subscription error:', err));
+      }, (err) => console.warn('Leaves subscription notice:', err));
 
       return () => unsub();
     } catch (e) {
-      console.warn('Leaves listener init error:', e);
+      console.warn('Leaves listener init notice:', e);
     }
-  }, [staffProfile.id, staffProfile.name]);
+  }, [staffProfile.id, staffProfile.name, staffId, staffName]);
 
-  // 4. Real-time Daily Work Reports Listener
+  // 4. Real-time Daily Work Reports Listener (Scoped to current staff)
   useEffect(() => {
     const db = getSafeDb();
     if (!db) return;
 
+    const targetId = staffProfile.id || staffId;
+    const targetName = staffProfile.name || staffName;
+
     try {
       const reportsRef = collection(db, 'staff_reports');
-      const q = query(reportsRef, orderBy('submittedAt', 'desc'));
+      const q = targetId
+        ? query(reportsRef, where('staffId', '==', targetId), limit(30))
+        : query(reportsRef, limit(30));
+
       const unsub = onSnapshot(q, (snap) => {
         const list: StaffDailyReport[] = [];
         snap.forEach(docSnap => {
           const d = docSnap.data() as any;
-          if (d.staffId === staffProfile.id || d.staffName === staffProfile.name) {
+          if (!targetId || d.staffId === targetId || (targetName && d.staffName === targetName)) {
             list.push({ id: docSnap.id, ...d });
           }
         });
+        list.sort((a, b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')));
         setMyReports(list);
-      }, (err) => console.warn('Staff reports subscription error:', err));
+      }, (err) => console.warn('Staff reports subscription notice:', err));
 
       return () => unsub();
     } catch (e) {
-      console.warn('Reports listener init error:', e);
+      console.warn('Reports listener init notice:', e);
     }
-  }, [staffProfile.id, staffProfile.name]);
+  }, [staffProfile.id, staffProfile.name, staffId, staffName]);
 
   // Helper: Get Exact Device Location (Street, Area, District, GPS Coordinates via Hardware GPS)
   const getDeviceLocation = async (): Promise<{ latitude: number; longitude: number; address: string } | null> => {
@@ -719,6 +741,19 @@ export const StaffScreen: React.FC<StaffScreenProps> = ({
         };
 
         await addDoc(collection(db, 'leaves'), newLeave);
+
+        // Send push notification to Admin & HR
+        createStaffLeaveRequestNotificationInFirestore({
+          staffName: staffProfile.name,
+          branch: staffProfile.branch,
+          staffId: staffProfile.id,
+          leaveType,
+          fromDate: leaveFrom,
+          toDate: leaveTo,
+          daysCount: days,
+          reason: leaveReason.trim(),
+        }).catch(() => {});
+
         Alert.alert(
           'Leave Submitted',
           `Your ${leaveType} leave application for ${days} day(s) (${leaveFrom} to ${leaveTo}, Joining on ${finalJoiningDate}) has been sent to Admin & HR for approval.`

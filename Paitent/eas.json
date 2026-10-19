@@ -1,0 +1,30 @@
+{
+  "cli": {
+    "version": ">= 20.3.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal"
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "production": {
+      "autoIncrement": true
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "ascApiKeyPath": "./AuthKey_J9KQ564UBZ.p8",
+        "ascApiKeyIssuerId": "f907e5f1-3f9f-4b3e-9e9b-6c2cfb46bb75",
+        "ascApiKeyId": "J9KQ564UBZ"
+      }
+    }
+  }
+}

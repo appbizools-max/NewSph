@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { doc, updateDoc, setDoc, getDocs, collection, query, where, arrayUnion, addDoc, onSnapshot, limit } from 'firebase/firestore';
+import { doc, updateDoc, setDoc, getDocs, collection, query, where, arrayUnion, addDoc, onSnapshot, limit, increment } from 'firebase/firestore';
 import { getStorage, ref as storageRef, uploadString, getDownloadURL } from 'firebase/storage';
 import { getApp, getApps, initializeApp } from 'firebase/app';
 import {
@@ -59,7 +59,7 @@ const uploadPrescriptionToStorage = async (dataOrUri: string, patId?: string): P
   return dataOrUri;
 };
 import { calculateDurationExpiry, getPatientVisitState } from '../utils/patientVisitState';
-import { calculateRealBranchRevenue, syncBranchTargetToFirestore } from '../utils/branchRevenueCalculator';
+import { calculateRealBranchRevenue, syncBranchTargetToFirestore, incrementBranchTargetRevenue } from '../utils/branchRevenueCalculator';
 import { receptionDataStore } from '../utils/receptionDataStore';
 
 export interface CheckoutMedicineItem {
@@ -1428,6 +1428,46 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
       await updateDoc(doc(db, 'allpatients', appointment.id), payload).catch(() => { });
       await updateDoc(doc(db, 'patients', appointment.id), payload).catch(() => { });
 
+      // Record transaction in alltransactions for instant real-time audit & revenue ledger
+      if (totalAmountDue > 0 && db) {
+        addDoc(collection(db, 'alltransactions'), {
+          appointmentId: appointment.id,
+          patientDocId: (appointment as any).patientDocId || appointment.id,
+          patientId: (appointment as any).regId || (appointment as any).registrationId || (appointment as any).patientId || appointment.id,
+          patientName: patientName || 'Patient',
+          phone: patientPhone || '',
+          branchName: (appointment as any).branch || (appointment as any).branchName || 'KPHB',
+          doctorName: appointment.doctorName || appointment.doctor || 'Dr. Prashanth K Vaidya',
+          amount: totalAmountDue,
+          totalAmount: totalAmountDue,
+          consultationFee: isPackageCoveredFully || paymentTypePreset === 'package' ? 0 : activeConsultFee,
+          medicineFee: isPackageCoveredFully || paymentTypePreset === 'package' ? 0 : activeMedicineFee,
+          packageFee: paymentTypePreset === 'package' ? totalAmountDue : 0,
+          dietFee: activeDietFee,
+          paymentMethod: selectedPaymentMode.toLowerCase(),
+          paymentMode: finalPaymentMode,
+          revenueSplit: paymentTypePreset === 'package' ? 'Package' : (activeMedicineFee > 0 ? 'Consultation & Medicine Fee' : 'Consultation'),
+          source: (appointment as any).marketingSource || (appointment as any).source || 'Walk-in',
+          status: 'PAID',
+          createdAt: new Date().toISOString(),
+          paymentCollectedAt: new Date().toISOString()
+        }).catch(() => { });
+      }
+
+      // Atomically increment branch target reached in real-time
+      if (totalAmountDue > 0 && db) {
+        const rawBranch = String(appointment.branch || appointment.branchName || 'kphb').toLowerCase();
+        const bKey = rawBranch.includes('nalla') ? 'nallagandla'
+          : rawBranch.includes('dilshuk') ? 'dilshuknagar'
+          : rawBranch.includes('chanda') ? 'chandanagar'
+          : 'kphb';
+
+        updateDoc(doc(db, 'branchTargets', bKey), {
+          targetReached: increment(totalAmountDue),
+          updatedAt: new Date().toISOString()
+        }).catch(() => { });
+      }
+
       // Ensure prescription record is saved in prescriptions collection
       if (uploadedPrescriptionList.length > 0 && db) {
         addDoc(collection(db, 'prescriptions'), {
@@ -1583,20 +1623,13 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
         onSuccess(completedInvoice);
       }
 
-      // Automatically sync dynamic target reach and percentage for this branch to Firestore
+      // Automatically atomically increment dynamic target reach for this branch in Firestore
       const targetBranch = appointment.branch || appointment.targetBranch || appointment.branchName;
-      if (targetBranch) {
+      if (targetBranch && totalAmountDue > 0) {
         try {
-          const liveApps = receptionDataStore.getAppointments();
-          const livePkgs = receptionDataStore.getPackageMembers();
-          const updatedApps = liveApps.map(a => a.id === appointment.id ? { ...a, ...payload } : a);
-          if (!updatedApps.some(a => a.id === appointment.id)) {
-            updatedApps.push(completedInvoice);
-          }
-          const calcRes = calculateRealBranchRevenue(targetBranch, updatedApps, livePkgs);
-          syncBranchTargetToFirestore(db, targetBranch, calcRes.targetReached, calcRes.monthlyTarget).catch(() => { });
+          incrementBranchTargetRevenue(db, targetBranch, totalAmountDue).catch(() => { });
         } catch (syncErr) {
-          console.warn('Branch target sync notice:', syncErr);
+          console.warn('Branch target increment notice:', syncErr);
         }
       }
 

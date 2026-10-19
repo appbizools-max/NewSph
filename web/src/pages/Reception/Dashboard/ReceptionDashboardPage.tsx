@@ -5,7 +5,7 @@ import {
   ArrowUp, ArrowDown, Phone, CalendarClock, X, Save, MoreVertical, MessageCircle, FileText, RotateCcw
 } from 'lucide-react';
 import { db, sendRescheduleWhatsAppNotification, sendCancellationWhatsAppNotification, sendInvoiceReceiptWhatsAppNotification, sendExperienceWhatsAppNotification, sendInvoiceWhatsAppNotification, CanonicalBranchId, sanitizeDoctorName, resolveCanonicalBranchId } from '@app/shared';
-import { collection, onSnapshot, updateDoc, deleteDoc, doc, query, where, getDocs } from 'firebase/firestore';
+import { collection, onSnapshot, updateDoc, deleteDoc, doc, query, where, getDocs, increment, getDoc, setDoc } from 'firebase/firestore';
 import { TargetProgressWebUI } from '../../../components/TargetProgressWebUI';
 import { PatientFileUI } from '../../../components/PatientFileUI';
 import { CollectFeeCheckoutModal } from '../../../components/CollectFeeCheckoutModal';
@@ -178,14 +178,18 @@ export const ReceptionDashboardPage: React.FC<ReceptionDashboardPageProps> = ({
   }, []);
 
   const DEFAULT_BRANCH_TARGETS: Record<string, { monthlyTarget: number; targetReached: number }> = {
-    kphb: { monthlyTarget: 0, targetReached: 0 },
-    nallagandla: { monthlyTarget: 0, targetReached: 0 },
-    dilshuknagar: { monthlyTarget: 0, targetReached: 0 },
-    chandanagar: { monthlyTarget: 0, targetReached: 0 },
+    kphb: { monthlyTarget: 725000, targetReached: 0 },
+    nallagandla: { monthlyTarget: 325000, targetReached: 0 },
+    dilshuknagar: { monthlyTarget: 225000, targetReached: 0 },
+    chandanagar: { monthlyTarget: 550000, targetReached: 0 },
   };
 
   const getBranchDefaultTarget = (bName: string) => {
-    return { monthlyTarget: 0, targetReached: 0 };
+    const norm = String(bName || '').toLowerCase();
+    if (norm.includes('nalla') || norm.includes('nallagandla')) return DEFAULT_BRANCH_TARGETS.nallagandla;
+    if (norm.includes('dilshuk') || norm.includes('dilsukh') || norm.includes('dsnr') || norm.includes('dshnr')) return DEFAULT_BRANCH_TARGETS.dilshuknagar;
+    if (norm.includes('chanda') || norm.includes('chnr') || norm.includes('chandanagar')) return DEFAULT_BRANCH_TARGETS.chandanagar;
+    return DEFAULT_BRANCH_TARGETS.kphb;
   };
 
   const activeBranchName = currentBranch || 'KPHB Branch';
@@ -194,11 +198,39 @@ export const ReceptionDashboardPage: React.FC<ReceptionDashboardPageProps> = ({
   // Subscribe live to Firestore branchTargets
   const [branchTarget, setBranchTarget] = useState({
     monthlyTarget: initialTarget.monthlyTarget,
-    targetReached: initialTarget.targetReached,
+    targetReached: 0,
     branchName: activeBranchName
   });
 
   useEffect(() => {
+    // Ensure base target configuration exists in Firestore branchTargets without overwriting revenue
+    const branchesToSync = [
+      { id: 'kphb', name: 'KPHB Branch', monthlyTarget: 725000 },
+      { id: 'chandanagar', name: 'Chandanagar Branch', monthlyTarget: 550000 },
+      { id: 'nallagandla', name: 'Nallagandla Branch', monthlyTarget: 325000 },
+      { id: 'dilshuknagar', name: 'Dilshuknagar Branch', monthlyTarget: 225000 }
+    ];
+    branchesToSync.forEach(async (b) => {
+      try {
+        const docRef = doc(db, 'branchTargets', b.id);
+        const snap = await getDoc(docRef);
+        if (!snap.exists()) {
+          await setDoc(docRef, {
+            id: b.id,
+            branchId: b.id,
+            branchName: b.name,
+            monthlyTarget: b.monthlyTarget,
+            targetReached: 0,
+            remaining: b.monthlyTarget,
+            percentage: 0,
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+        }
+      } catch (err) {
+        console.warn(`Authoritative branch target sync notice for ${b.id}:`, err);
+      }
+    });
+
     try {
       const colRef = collection(db, 'branchTargets');
       const unsubscribe = onSnapshot(colRef, (snapshot) => {
@@ -234,9 +266,11 @@ export const ReceptionDashboardPage: React.FC<ReceptionDashboardPageProps> = ({
           }
 
           if (targetData) {
+            const effectiveReached = Number(targetData.targetReached) || 0;
+            const effectiveTarget = Number(targetData.monthlyTarget) || defTarget.monthlyTarget;
             setBranchTarget({
-              monthlyTarget: Number(targetData.monthlyTarget) || defTarget.monthlyTarget,
-              targetReached: Number(targetData.targetReached) || defTarget.targetReached,
+              monthlyTarget: effectiveTarget,
+              targetReached: effectiveReached,
               branchName: targetData.branchName || curBranch
             });
           } else {
@@ -265,19 +299,6 @@ export const ReceptionDashboardPage: React.FC<ReceptionDashboardPageProps> = ({
     const curBranch = currentBranch || 'KPHB Branch';
     return calculateRealBranchRevenue(curBranch, appointments, packageMembersList, branchTarget.monthlyTarget);
   }, [currentBranch, appointments, packageMembersList, branchTarget.monthlyTarget]);
-
-  useEffect(() => {
-    // Only update and sync to Firestore if realBranchResult is GREATER than branchTarget.targetReached
-    // This protects the true monthly branch target from being overwritten by an incomplete local appointments subset
-    if (realBranchResult.targetReached > (branchTarget.targetReached || 0) && appointments.length > 0) {
-      setBranchTarget(prev => ({
-        ...prev,
-        targetReached: realBranchResult.targetReached,
-        monthlyTarget: realBranchResult.monthlyTarget || prev.monthlyTarget,
-      }));
-      syncBranchTargetToFirestore(db, realBranchResult.branchName, realBranchResult.targetReached, realBranchResult.monthlyTarget).catch(() => { });
-    }
-  }, [realBranchResult.targetReached, realBranchResult.monthlyTarget, realBranchResult.branchName, branchTarget.targetReached, appointments.length]);
 
 
 
@@ -360,7 +381,21 @@ export const ReceptionDashboardPage: React.FC<ReceptionDashboardPageProps> = ({
       if (targetApp) {
         const phone = targetApp.phoneNumber || targetApp.phone || '';
         const patientName = targetApp.patientName || targetApp.fullName || targetApp.name || 'Patient';
-        const totalPaid = Number(targetApp.totalPaid || targetApp.targetAmount || targetApp.amount || 1000);
+        const totalPaid = Number(targetApp.totalPaid || targetApp.targetAmount || targetApp.amount || 0);
+
+        // Atomically increment branch target reached in real-time
+        if (totalPaid > 0 && db) {
+          const rawBranch = String(targetApp.branch || targetApp.branchName || currentBranch || 'kphb').toLowerCase();
+          const bKey = rawBranch.includes('nalla') ? 'nallagandla'
+            : rawBranch.includes('dilshuk') ? 'dilshuknagar'
+            : rawBranch.includes('chanda') ? 'chandanagar'
+            : 'kphb';
+
+          updateDoc(doc(db, 'branchTargets', bKey), {
+            targetReached: increment(totalPaid),
+            updatedAt: new Date().toISOString()
+          }).catch(() => { });
+        }
 
         // Trigger Full 3-Step WhatsApp Flow (Payment Receipt -> Invoice with PDF -> 5s -> Experience Feedback Survey)
         sendInvoiceWhatsAppNotification({
@@ -758,9 +793,9 @@ export const ReceptionDashboardPage: React.FC<ReceptionDashboardPageProps> = ({
       {/* Dynamic Real-Time Target Progress Card */}
       <div style={{ marginBottom: '20px' }}>
         <TargetProgressWebUI
-          branchName={branchTarget.branchName || realBranchResult.branchName}
-          monthlyTarget={branchTarget.monthlyTarget || realBranchResult.monthlyTarget}
-          targetReached={Math.max(branchTarget.targetReached || 0, realBranchResult.targetReached || 0)}
+          branchName={branchTarget.branchName || (currentBranch || 'KPHB Branch')}
+          monthlyTarget={branchTarget.monthlyTarget || 0}
+          targetReached={branchTarget.targetReached || 0}
         />
       </div>
 
@@ -1196,6 +1231,26 @@ export const ReceptionDashboardPage: React.FC<ReceptionDashboardPageProps> = ({
                         >
                           {visitState.badgeText}
                         </span>
+                        {visitState.isApp && (
+                          <span
+                            title="Booked from Patient App"
+                            style={{
+                              fontSize: '9.5px',
+                              background: '#f3e8ff',
+                              color: '#7e22ce',
+                              border: '1px solid #d8b4fe',
+                              padding: '1px 5px',
+                              borderRadius: '4px',
+                              fontWeight: 900,
+                              letterSpacing: '0.4px',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '2px'
+                            }}
+                          >
+                            APP
+                          </span>
+                        )}
                         {!isCompleted && activeTab !== 'completed' && (
                           <span style={{ fontSize: '10px', background: '#e0f2fe', color: '#0284c7', padding: '1px 6px', borderRadius: '4px', fontWeight: 800 }}>
                             📄 File

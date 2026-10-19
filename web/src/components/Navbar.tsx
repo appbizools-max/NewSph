@@ -36,22 +36,68 @@ export const Navbar: React.FC<NavbarProps> = ({
   });
   const notiDropdownRef = useRef<HTMLDivElement>(null);
 
+  // Branch topic normalizer for accurate reception branch matching
+  const normalizeBranchTopic = (raw: string = '') => {
+    const s = String(raw || '').toLowerCase().trim();
+    if (s.includes('kphb') || s.includes('kukatpally')) return 'kphb';
+    if (s.includes('nalla') || s.includes('nallagandla') || s.includes('nlg')) return 'nallagandla';
+    if (s.includes('dilshuk') || s.includes('dilsukh') || s.includes('dsnr') || s.includes('dshnr')) return 'dilshuknagar';
+    if (s.includes('chanda') || s.includes('chnr') || s.includes('chandanagar') || s.includes('cngr')) return 'chandanagar';
+    return '';
+  };
+
   useEffect(() => {
     if (!db) return;
     try {
-      const q = query(collection(db, 'notifications'), orderBy('createdAt', 'desc'), limit(15));
+      // Fetch up to 50 notifications so branch filtering has enough items to display
+      const q = query(collection(db, 'notifications'), orderBy('createdAt', 'desc'), limit(50));
       const unsub = onSnapshot(q, (snapshot) => {
-        const list: any[] = [];
+        const rawList: any[] = [];
         snapshot.docs.forEach((docSnap) => {
-          list.push({ id: docSnap.id, ...docSnap.data() });
+          rawList.push({ id: docSnap.id, ...docSnap.data() });
         });
-        setNotifications(list);
+
+        const userRole = (role || 'reception').toLowerCase();
+        const userBranchKey = normalizeBranchTopic(branchName);
+
+        // Filter notifications based on role and branch
+        const filtered = rawList.filter((n) => {
+          // 1. Role permission check: if notification specifies targetRoles, check if userRole is included
+          if (Array.isArray(n.targetRoles) && n.targetRoles.length > 0) {
+            const hasRole = n.targetRoles.some((r: string) => {
+              const rLower = String(r).toLowerCase();
+              if (rLower === 'all') return true;
+              if (userRole === 'admin' && (rLower === 'admin' || rLower === 'hr')) return true;
+              if (userRole === 'hr' && (rLower === 'hr' || rLower === 'admin')) return true;
+              return rLower === userRole;
+            });
+            if (!hasRole && userRole !== 'admin' && userRole !== 'hr') {
+              return false;
+            }
+          }
+
+          // 2. Branch check: Admin and HR see notifications across all branches
+          if (userRole === 'admin' || userRole === 'hr') {
+            return true;
+          }
+
+          // 3. For Reception and Staff: ONLY show notifications that belong to their branch!
+          const notiBranchKey = normalizeBranchTopic(n.targetBranch || n.branch || n.branchName || n.body || n.title);
+          if (notiBranchKey && userBranchKey) {
+            return notiBranchKey === userBranchKey;
+          }
+
+          // If notification is global/branchless, allow it
+          return !notiBranchKey;
+        });
+
+        setNotifications(filtered.slice(0, 15));
       });
       return () => unsub();
     } catch (e) {
       console.warn('Web notification listener notice:', e);
     }
-  }, []);
+  }, [branchName, role]);
 
   // Close dropdown on outside click
   useEffect(() => {

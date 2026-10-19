@@ -7,10 +7,10 @@ import { receptionDataStore } from '../../../utils/receptionDataStore';
 import { calculateRealBranchRevenue, syncBranchTargetToFirestore } from '../../../utils/branchRevenueCalculator';
 
 const DEFAULT_BRANCH_TARGETS = [
-  { id: 'kphb', name: 'KPHB Branch Target', monthlyTarget: 0, targetReached: 0 },
-  { id: 'nallagandla', name: 'Nallagandla Branch Target', monthlyTarget: 0, targetReached: 0 },
-  { id: 'dilshuknagar', name: 'Dilshuknagar Branch Target', monthlyTarget: 0, targetReached: 0 },
-  { id: 'chandanagar', name: 'Chandanagar Branch Target', monthlyTarget: 0, targetReached: 0 },
+  { id: 'kphb', name: 'KPHB Branch Target', monthlyTarget: 725000, targetReached: 0 },
+  { id: 'nallagandla', name: 'Nallagandla Branch Target', monthlyTarget: 325000, targetReached: 0 },
+  { id: 'dilshuknagar', name: 'Dilshuknagar Branch Target', monthlyTarget: 225000, targetReached: 0 },
+  { id: 'chandanagar', name: 'Chandanagar Branch Target', monthlyTarget: 550000, targetReached: 0 },
 ];
 
 export const BranchTargetHRPage: React.FC = () => {
@@ -26,34 +26,6 @@ export const BranchTargetHRPage: React.FC = () => {
   const currentDay = now.getDate();
   const isMonthEndUnlocked = currentDay >= unlockDay;
 
-  // Subscribe to real-time collections via receptionDataStore to calculate live revenue
-  useEffect(() => {
-    receptionDataStore.startListeners();
-    const unsub = receptionDataStore.subscribe((state) => {
-      const appts = state.appointments;
-      const pkgs = state.packageMembersList;
-
-      setBranchTargets((prev) =>
-        prev.map((b) => {
-          const res = calculateRealBranchRevenue(b.name, appts, pkgs, b.monthlyTarget);
-          if (res.targetReached > (b.targetReached || 0)) {
-            if (res.monthlyTarget > 0) {
-              syncBranchTargetToFirestore(db, b.name, res.targetReached, res.monthlyTarget).catch(() => {});
-            } else {
-              syncBranchTargetToFirestore(db, b.name, res.targetReached).catch(() => {});
-            }
-          }
-          return {
-            ...b,
-            monthlyTarget: b.monthlyTarget > 0 ? b.monthlyTarget : res.monthlyTarget,
-            targetReached: Math.max(b.targetReached || 0, res.targetReached),
-          };
-        })
-      );
-    });
-    return () => unsub();
-  }, []);
-
   useEffect(() => {
     try {
       const colRef = collection(db, 'branchTargets');
@@ -64,19 +36,20 @@ export const BranchTargetHRPage: React.FC = () => {
             liveMap[docSnap.id.toLowerCase()] = docSnap.data();
           });
 
-          setBranchTargets((prev) =>
-            prev.map((b) => {
-              const live = liveMap[b.id] || liveMap[b.name.toLowerCase().replace(/\s*branch\s*target$/i, '')];
+          setBranchTargets((prev: any[]) => {
+            const updated = prev.map((b) => {
+              const live = liveMap[b.id.toLowerCase()] || liveMap[b.name.toLowerCase().replace(/\s*branch\s*target$/i, '')];
               if (live) {
                 return {
                   ...b,
-                  monthlyTarget: Number(live.monthlyTarget) || 0,
-                  targetReached: Number(live.targetReached) || 0,
+                  monthlyTarget: Number(live.monthlyTarget) || b.monthlyTarget,
+                  targetReached: live.targetReached !== undefined ? Number(live.targetReached) : 0,
                 };
               }
               return b;
-            })
-          );
+            });
+            return updated;
+          });
         }
       });
       return () => unsubscribe();
@@ -114,7 +87,7 @@ export const BranchTargetHRPage: React.FC = () => {
         updatedAt: new Date().toISOString()
       }, { merge: true });
 
-      setBranchTargets(prev => prev.map(b => b.id === editingBranch.id ? { ...b, monthlyTarget: num } : b));
+      setBranchTargets((prev: any[]) => prev.map((b: any) => b.id === editingBranch.id ? { ...b, monthlyTarget: num } : b));
       setEditingBranch(null);
     } catch (err) {
       console.error('Error updating target:', err);
@@ -174,7 +147,7 @@ export const BranchTargetHRPage: React.FC = () => {
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '16px' }}>
-        {branchTargets.map(b => {
+        {branchTargets.map((b: any) => {
           const pct = b.monthlyTarget > 0 ? Math.round((b.targetReached / b.monthlyTarget) * 100) : 0;
           return (
             <div key={b.name} style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '16px', padding: '18px', boxShadow: '0 2px 6px rgba(15,23,42,0.03)' }}>

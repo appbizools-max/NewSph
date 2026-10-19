@@ -1,11 +1,28 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
 
+// Auto-patch expo-modules-core PermissionsService.kt for Android SDK 36 nullability
+try {
+    def permissionsServiceFile = file("../../../node_modules/expo-modules-core/android/src/main/java/expo/modules/adapters/react/permissions/PermissionsService.kt")
+    if (permissionsServiceFile.exists()) {
+        def text = permissionsServiceFile.text
+        if (text.contains("return requestedPermissions.contains(permission)")) {
+            permissionsServiceFile.text = text.replace(
+                "return requestedPermissions.contains(permission)",
+                "return requestedPermissions?.contains(permission) == true"
+            )
+            println "[Build Patch] Applied Android SDK 36 nullability fix to PermissionsService.kt"
+        }
+    }
+} catch (Exception e) {
+    println "[Build Patch Notice] " + e.message
+}
+
 buildscript {
     ext {
-        buildToolsVersion = findProperty('android.buildToolsVersion') ?: '34.0.0'
+        buildToolsVersion = findProperty('android.buildToolsVersion') ?: '36.0.0'
         minSdkVersion = Integer.parseInt(findProperty('android.minSdkVersion') ?: '24')
-        compileSdkVersion = Integer.parseInt(findProperty('android.compileSdkVersion') ?: '34')
-        targetSdkVersion = Integer.parseInt(findProperty('android.targetSdkVersion') ?: '34')
+        compileSdkVersion = Integer.parseInt(findProperty('android.compileSdkVersion') ?: '36')
+        targetSdkVersion = Integer.parseInt(findProperty('android.targetSdkVersion') ?: '36')
         kotlinVersion = findProperty('android.kotlinVersion') ?: '1.9.23'
 
         ndkVersion = "26.1.10909125"

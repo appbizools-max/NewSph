@@ -5,10 +5,10 @@ import { getSafeDb, doc, onSnapshot, setDoc, collection } from '../../utils/fire
 import { TargetProgressUI } from '../../components/TargetProgressUI';
 
 const DEFAULT_BRANCH_TARGETS = [
-  { id: 'kphb', name: 'KPHB Branch', phone: '+91 90301 76176', monthlyTarget: 0, targetReached: 0, nextMonthTarget: 0 },
-  { id: 'nallagandla', name: 'Nallagandla Branch', phone: '+91 91321 76176', monthlyTarget: 0, targetReached: 0, nextMonthTarget: 0 },
-  { id: 'dilshuknagar', name: 'Dilshuknagar Branch', phone: '+91 98041 76176', monthlyTarget: 0, targetReached: 0, nextMonthTarget: 0 },
-  { id: 'chandanagar', name: 'Chandanagar Branch', phone: '+91 95531 76176', monthlyTarget: 0, targetReached: 0, nextMonthTarget: 0 },
+  { id: 'kphb', name: 'KPHB Branch', phone: '+91 90301 76176', monthlyTarget: 725000, targetReached: 0, nextMonthTarget: 0 },
+  { id: 'nallagandla', name: 'Nallagandla Branch', phone: '+91 91321 76176', monthlyTarget: 325000, targetReached: 0, nextMonthTarget: 0 },
+  { id: 'dilshuknagar', name: 'Dilshuknagar Branch', phone: '+91 98041 76176', monthlyTarget: 225000, targetReached: 0, nextMonthTarget: 0 },
+  { id: 'chandanagar', name: 'Chandanagar Branch', phone: '+91 95531 76176', monthlyTarget: 550000, targetReached: 0, nextMonthTarget: 0 },
 ];
 
 interface ManageBranchesScreenProps {
@@ -47,17 +47,17 @@ export const ManageBranchesScreen: React.FC<ManageBranchesScreenProps> = ({ onBa
         if (!snapshot.empty) {
           const liveDataMap: Record<string, any> = {};
           snapshot.forEach((docSnap) => {
-            liveDataMap[docSnap.id] = docSnap.data();
+            liveDataMap[docSnap.id.toLowerCase()] = docSnap.data();
           });
 
           setBranches((prev) =>
             prev.map((b) => {
-              const live = liveDataMap[b.id] || liveDataMap[b.name];
+              const live = liveDataMap[b.id.toLowerCase()] || liveDataMap[b.name.toLowerCase()];
               if (live) {
                 return {
                   ...b,
-                  monthlyTarget: Number(live.monthlyTarget) || 0,
-                  targetReached: Number(live.targetReached) || 0,
+                  monthlyTarget: Number(live.monthlyTarget) || b.monthlyTarget,
+                  targetReached: live.targetReached !== undefined ? Number(live.targetReached) : b.targetReached,
                   nextMonthTarget: live.nextMonthTarget !== undefined ? Number(live.nextMonthTarget) : 0,
                 };
               }

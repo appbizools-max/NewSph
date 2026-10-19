@@ -109,10 +109,7 @@ export async function sendSmsOtp(phone: string, otp: string): Promise<SendSmsOtp
   // Use Vite proxy on web to bypass browser CORS; fallback to direct fetch
   const requestUrl = `/api/sms/v3/api.php?${queryParams.toString()}`;
 
-  console.log('\n======================================================================');
-  console.log(`📱 [SPH SMS OTP] Target Mobile: +91 ${clean10}`);
-  console.log(`🔑 OTP CODE FOR CMD: >>> ${otp} <<<`);
-  console.log('======================================================================\n');
+
 
   try {
     const controller = new AbortController();

@@ -13,9 +13,9 @@ import {
 } from 'react-native';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { getSafeDb, collection, onSnapshot, doc, updateDoc, query, limit } from '../utils/firebaseSafe';
-import { sendRescheduleWhatsAppNotification, sendCancellationWhatsAppNotification, sendInvoiceReceiptWhatsAppNotification, sendExperienceWhatsAppNotification, sendInvoiceWhatsAppNotification } from '@app/shared';
+import { sendRescheduleWhatsAppNotification, sendCancellationWhatsAppNotification, sendInvoiceReceiptWhatsAppNotification, sendExperienceWhatsAppNotification, sendInvoiceWhatsAppNotification, sendRescheduleSMS, sendCancellationSMS } from '@app/shared';
 import { DEFAULT_DOCTORS_SEED } from '../screens/Reception/BookAppointment/BookAppointmentScreen';
-import { getPatientVisitState } from '../utils/patientVisitState';
+import { getPatientVisitState, isAppAppointment } from '../utils/patientVisitState';
 import { receptionDataStore } from '../utils/receptionDataStore';
 export interface PatientAppointmentRecord {
   id: string;
@@ -320,6 +320,20 @@ export const AppointmentsQueueUI: React.FC<AppointmentsQueueUIProps> = ({
         branch: selectedRescheduleAppt.branch || 'KPHB'
       }).catch(err => console.error('WhatsApp reschedule notification error:', err));
 
+      // Trigger SMS Reschedule Notification
+      const targetReschedulePhone = selectedRescheduleAppt.phone || (selectedRescheduleAppt as any).phoneNumber || '';
+      const targetRescheduleName = selectedRescheduleAppt.name || (selectedRescheduleAppt as any).patientName || 'Patient';
+      if (targetReschedulePhone) {
+        sendRescheduleSMS(
+          targetReschedulePhone,
+          targetRescheduleName,
+          rescheduleDoctor,
+          rescheduleDate,
+          rescheduleTime,
+          selectedRescheduleAppt.branch || 'KPHB'
+        ).catch(err => console.warn('SMS reschedule notification notice:', err));
+      }
+
       Alert.alert('Rescheduled', `Appointment for ${selectedRescheduleAppt.name} rescheduled to ${rescheduleDate} at ${rescheduleTime}.`);
       setRescheduleModalOpen(false);
     } catch (err) {
@@ -424,6 +438,15 @@ export const AppointmentsQueueUI: React.FC<AppointmentsQueueUIProps> = ({
                   doctorName: targetApp.doctor,
                   branch: targetBranch
                 }).catch(err => console.error('Cancellation WhatsApp notification error:', err));
+
+                sendCancellationSMS(
+                  targetApp.phone || '',
+                  targetApp.name || 'Patient',
+                  targetApp.doctor,
+                  targetApp.date || '',
+                  targetApp.time || '10:00 AM',
+                  targetBranch
+                ).catch(err => console.warn('Cancellation SMS notification notice:', err));
               }
 
               const payload = {
@@ -556,10 +579,18 @@ export const AppointmentsQueueUI: React.FC<AppointmentsQueueUIProps> = ({
                     {(() => {
                       const vState = patient.visitState || patientVisitStates.get(patient.id);
                       if (!vState) return null;
+                      const isApp = vState.isApp || isAppAppointment(patient);
                       return (
-                        <View style={{ backgroundColor: vState.badgeBg, borderWidth: 1, borderColor: vState.badgeBorder, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4 }}>
-                          <Text style={{ fontSize: 9.5, fontWeight: '900', color: vState.badgeColor }}>{vState.badgeText}</Text>
-                        </View>
+                        <>
+                          <View style={{ backgroundColor: vState.badgeBg, borderWidth: 1, borderColor: vState.badgeBorder, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4 }}>
+                            <Text style={{ fontSize: 9.5, fontWeight: '900', color: vState.badgeColor }}>{vState.badgeText}</Text>
+                          </View>
+                          {isApp ? (
+                            <View style={{ backgroundColor: '#f3e8ff', borderWidth: 1, borderColor: '#d8b4fe', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4 }}>
+                              <Text style={{ fontSize: 9.5, fontWeight: '900', color: '#7e22ce' }}>APP</Text>
+                            </View>
+                          ) : null}
+                        </>
                       );
                     })()}
                   </View>

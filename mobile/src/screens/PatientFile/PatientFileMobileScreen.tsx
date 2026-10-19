@@ -624,6 +624,7 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
   }, [onBack]);
 
   // Patient Info (Clean real data extraction, NO mock fallbacks)
+  const isEditPrescriptionOnly = Boolean(patient?.editPrescriptionOnly || patient?.disableAmount || patient?.isEditPrescriptionOnly || patient?.lockPayment);
   const patientName = renderSafeString(patient?.patientName || patient?.fullName || patient?.name || patient?.patient_name || patient?.patient, '');
   const regId = renderSafeString(patient?.registrationId || patient?.regId || patient?.regNo || patient?.patientId || patient?.registrationNo || patient?.uhid || patient?.patient_id, '');
   const phone = renderSafeString(patient?.phone || patient?.phoneNumber || patient?.mobile || patient?.mobileNumber || patient?.contact || patient?.contactNumber || patient?.phoneNo, '');
@@ -1141,24 +1142,24 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
         uploadedPrescriptions: initialUploadedImages,
         diagnosisNotes,
         consultationFee: numConsultationFee > 0 ? numConsultationFee : (patient?.consultationFee || 0),
-        medicineFee: numPharmacyFee,
-        pharmacyFee: numPharmacyFee,
-        totalMedicineFee: numPharmacyFee,
-        medicineFeeRequested: numPharmacyFee,
-        targetAmount: computedTarget,
-        target_amount: computedTarget,
+        medicineFee: isEditPrescriptionOnly ? (patient?.medicineFee || 0) : numPharmacyFee,
+        pharmacyFee: isEditPrescriptionOnly ? (patient?.medicineFee || 0) : numPharmacyFee,
+        totalMedicineFee: isEditPrescriptionOnly ? (patient?.medicineFee || 0) : numPharmacyFee,
+        medicineFeeRequested: isEditPrescriptionOnly ? 0 : numPharmacyFee,
+        targetAmount: isEditPrescriptionOnly ? (patient?.targetAmount || patient?.totalAmount || 0) : computedTarget,
+        target_amount: isEditPrescriptionOnly ? (patient?.targetAmount || patient?.totalAmount || 0) : computedTarget,
         dietFee: numDietFee,
         dietFeeAmount: dietFeeAmount,
-        totalAmount: totalCalculated > 0 ? totalCalculated : Number(patient?.totalAmount || 0),
+        totalAmount: isEditPrescriptionOnly ? (patient?.totalAmount || patient?.amountPaid || 0) : (totalCalculated > 0 ? totalCalculated : Number(patient?.totalAmount || 0)),
         followUpInterval,
         preferredFollowUpDate: formatDDMMYYYY(preferredFollowUpDate),
         doctorName: docNameToSave,
         doctor: docNameToSave,
         ...(canvasDataUrl ? { canvasPrescriptionUrl: canvasDataUrl } : {}),
-        status: 'collect_fee',
-        paymentStatus: 'pending',
-        paymentPending: true,
-        feeCollectionNeeded: true,
+        status: isEditPrescriptionOnly ? (patient?.status || 'completed') : 'collect_fee',
+        paymentStatus: isEditPrescriptionOnly ? (patient?.paymentStatus || 'paid') : 'pending',
+        paymentPending: isEditPrescriptionOnly ? false : true,
+        feeCollectionNeeded: isEditPrescriptionOnly ? false : true,
         updatedAt: new Date().toISOString()
       };
 
@@ -1178,7 +1179,11 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
       if (onSaveConsultation) {
         onSaveConsultation(fullPayload);
       } else {
-        Alert.alert("Sent to Reception", "Consultation saved & patient sent to Reception for Fee Collection!");
+        if (isEditPrescriptionOnly) {
+          Alert.alert("Prescription Updated", "Prescription details updated successfully without affecting payment.");
+        } else {
+          Alert.alert("Sent to Reception", "Consultation saved & patient sent to Reception for Fee Collection!");
+        }
         if (onBack) onBack();
       }
       setIsSavingConsultation(false);
@@ -2833,19 +2838,47 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
 
             <View style={styles.inputGroup}>
               <Text style={styles.subTitle}>Consultation & Medicine Fee</Text>
-              <Text style={styles.label}>Enter Amount (₹)</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Enter amount..."
-                keyboardType="numeric"
-                value={pharmacyFee}
-                onChangeText={setPharmacyFee}
-              />
+              {isEditPrescriptionOnly ? (
+                <View style={{
+                  backgroundColor: '#f8fafc',
+                  borderWidth: 1.5,
+                  borderColor: '#cbd5e1',
+                  borderRadius: 8,
+                  padding: 12,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginTop: 6
+                }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Feather name="lock" size={16} color="#64748b" />
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: '#475569' }}>
+                      Fee Locked (Prescription Update Only)
+                    </Text>
+                  </View>
+                  <Text style={{ fontSize: 14, fontWeight: '900', color: '#0f172a' }}>
+                    ₹{Number(patient?.existingAmountPaid ?? patient?.amountPaid ?? patient?.totalAmount ?? 0).toLocaleString('en-IN')}
+                  </Text>
+                </View>
+              ) : (
+                <>
+                  <Text style={styles.label}>Enter Amount (₹)</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Enter amount..."
+                    keyboardType="numeric"
+                    value={pharmacyFee}
+                    onChangeText={setPharmacyFee}
+                  />
+                </>
+              )}
             </View>
 
             <TouchableOpacity style={styles.saveBtn} onPress={handleSaveConsultation}>
               <Text style={styles.saveBtnText}>
-                {isDoctor ? 'Submit Prescription & Send to Reception ✓' : 'Send to Reception & Collect Fee'}
+                {isEditPrescriptionOnly
+                  ? 'Update Prescription Only ✓'
+                  : (isDoctor ? 'Submit Prescription & Send to Reception ✓' : 'Send to Reception & Collect Fee')}
               </Text>
             </TouchableOpacity>
           </View>

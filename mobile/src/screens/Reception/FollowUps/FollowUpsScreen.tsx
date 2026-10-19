@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useCallback, memo } from 'react';
 import { View, Text, StyleSheet, FlatList, TouchableOpacity, Linking, ActivityIndicator, ScrollView, Modal, TextInput, Alert, Platform } from 'react-native';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { sendBookingWhatsAppNotification, CanonicalBranchId, resolveCanonicalBranchId, getBranchQueryNames, sanitizeDoctorName } from '@app/shared';
+import { sendBookingWhatsAppNotification, sendRescheduleWhatsAppNotification, sendBookingSMS, sendRescheduleSMS, CanonicalBranchId, resolveCanonicalBranchId, getBranchQueryNames, sanitizeDoctorName } from '@app/shared';
 import { getSafeDb, collection, onSnapshot, query, limit, updateDoc, doc, addDoc, orderBy, getDocs, where, setDoc } from '../../../utils/firebaseSafe';
 import { receptionDataStore } from '../../../utils/receptionDataStore';
 import { getPatientVisitState } from '../../../utils/patientVisitState';
@@ -544,6 +544,11 @@ const FollowUpCardItem = memo(({
                 <Text style={[styles.visitBadgeText, { color: visitState.badgeColor }]}>
                   {visitState.badgeText}
                 </Text>
+              </View>
+            ) : null}
+            {visitState?.isApp ? (
+              <View style={{ backgroundColor: '#f3e8ff', borderWidth: 1, borderColor: '#d8b4fe', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4 }}>
+                <Text style={{ fontSize: 9.5, fontWeight: '900', color: '#7e22ce' }}>APP</Text>
               </View>
             ) : null}
           </View>
@@ -1226,6 +1231,16 @@ export const FollowUpsScreen: React.FC<FollowUpsScreenProps> = ({
         branch: bookModalItem.branchName || currentBranch
       }).catch(err => console.error('WhatsApp booking error:', err));
 
+      sendBookingSMS(
+        cleanPhone || bookModalItem.phone,
+        bookModalItem.patientName,
+        bookingDoctor,
+        bookingDate,
+        bookingTime,
+        bookModalItem.branchName || currentBranch,
+        false
+      ).catch(err => console.warn('SMS booking error:', err));
+
       // Trigger FCM Push Notification and 10-day Firestore retention cleanup
       createBookingNotificationInFirestore({
         patientName: bookModalItem.patientName,
@@ -1442,6 +1457,32 @@ export const FollowUpsScreen: React.FC<FollowUpsScreenProps> = ({
           }, ...prev];
         }
       });
+
+      // Trigger WhatsApp and SMS Reschedule notifications
+      const targetPhone = cleanPhone || rescheduleModalItem.phone;
+      const targetFormattedDate = toDDMMYYYY(targetDateISO);
+      const targetBranch = rescheduleModalItem.branchName || currentBranch;
+      const targetDoctor = rescheduleModalItem.doctorName || 'Doctor';
+
+      if (targetPhone) {
+        sendRescheduleWhatsAppNotification({
+          patientName: rescheduleModalItem.patientName,
+          phone: targetPhone,
+          date: targetFormattedDate,
+          time: '10:00 AM',
+          doctorName: targetDoctor,
+          branch: targetBranch
+        }).catch(err => console.warn('WhatsApp reschedule error:', err));
+
+        sendRescheduleSMS(
+          targetPhone,
+          rescheduleModalItem.patientName,
+          targetDoctor,
+          targetFormattedDate,
+          '10:00 AM',
+          targetBranch
+        ).catch(err => console.warn('SMS reschedule error:', err));
+      }
 
       // 3. Close modal & alert
       setRescheduleModalItem(null);

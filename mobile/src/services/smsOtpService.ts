@@ -115,10 +115,7 @@ export async function sendSmsOtp(phone: string, otp: string): Promise<SendSmsOtp
 
   const requestUrl = `${SMS_CONFIG.baseUrl}?${queryParams}`;
 
-  console.log('\n======================================================================');
-  console.log(`📱 [SPH SMS OTP] Target Mobile: +91 ${clean10}`);
-  console.log(`🔑 OTP CODE FOR CMD: >>> ${otp} <<<`);
-  console.log('======================================================================\n');
+
 
   try {
     const controller = new AbortController();

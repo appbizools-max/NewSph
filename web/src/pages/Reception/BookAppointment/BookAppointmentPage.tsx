@@ -3739,6 +3739,22 @@ export const BookAppointmentPage: React.FC<BookAppointmentPageProps> = ({
                           }}>
                             {vState.badgeText}
                           </span>
+                          {vState.isApp && (
+                            <span style={{
+                              backgroundColor: '#f3e8ff',
+                              border: '1px solid #d8b4fe',
+                              color: '#7e22ce',
+                              padding: '1.5px 6px',
+                              borderRadius: '4px',
+                              fontSize: '10px',
+                              fontWeight: 800,
+                              letterSpacing: '0.3px',
+                              display: 'inline-flex',
+                              alignItems: 'center'
+                            }}>
+                              APP
+                            </span>
+                          )}
                           {prof.branchName && (
                             <span style={{
                               backgroundColor: '#e0f2fe',

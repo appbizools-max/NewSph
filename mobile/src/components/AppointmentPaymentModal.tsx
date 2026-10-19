@@ -8,6 +8,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import {
   sendInvoiceWhatsAppNotification,
+  sendPaymentReceiptSMS,
   resolveCanonicalBranchId,
   getBranchPhone,
   createRazorpayPaymentQr,
@@ -16,7 +17,7 @@ import {
   createRazorpayCardPaymentLink
 } from '@app/shared';
 import {
-  getSafeDb, doc, updateDoc, setDoc, getDocs, collection, query, where, arrayUnion, addDoc, onSnapshot, limit
+  getSafeDb, doc, updateDoc, setDoc, getDocs, collection, query, where, arrayUnion, addDoc, onSnapshot, limit, increment
 } from '../utils/firebaseSafe';
 import { getStorage, ref as storageRef, uploadString, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { getApp, getApps, initializeApp } from 'firebase/app';
@@ -224,9 +225,8 @@ const uploadInvoiceFileToStorage = async (fileUri: string, invCode: string): Pro
   }
   return fileUri;
 };
-
 import { calculateDurationExpiry, getPatientVisitState } from '../utils/patientVisitState';
-import { calculateRealBranchRevenue, syncBranchTargetToFirestore } from '../utils/branchRevenueCalculator';
+import { calculateRealBranchRevenue, syncBranchTargetToFirestore, incrementBranchTargetRevenue } from '../utils/branchRevenueCalculator';
 import { receptionDataStore } from '../utils/receptionDataStore';
 export interface CheckoutMedicineItem {
   id: string;
@@ -403,23 +403,23 @@ export const buildOfficialInvoiceHtml = (activeInvoice: any, patientName: string
             : (Number(activeInvoice?.medicineFee) > 0 ? `<tr><td>Medicine Fee${activeInvoice?.medicineDuration ? ` (${activeInvoice?.medicineDuration})` : ''}</td><td style="text-align: right; font-weight: 700;">₹${Number(activeInvoice?.medicineFee).toFixed(2)}</td></tr>` : '')}
               `
           : (isPkg
-              ? ''
-              : (Number(activeInvoice?.medicineFee) > 0 || (activeInvoice?.medicines && activeInvoice.medicines.length > 0)
-                  ? `
+            ? ''
+            : (Number(activeInvoice?.medicineFee) > 0 || (activeInvoice?.medicines && activeInvoice.medicines.length > 0)
+              ? `
                     ${Number(activeInvoice?.consultationFee) > 0 ? `<tr><td>Consultation Fee</td><td style="text-align: right; font-weight: 700;">₹${Number(activeInvoice?.consultationFee).toFixed(2)}</td></tr>` : ''}
                     ${activeInvoice?.medicines && activeInvoice.medicines.length > 0
-                      ? activeInvoice.medicines.map((m: any, idx: number) => {
-                        const medName = m.name && m.name.trim() ? m.name.trim() : (activeInvoice.medicines.length === 1 ? 'Medicine Fee' : `Medicine ${idx + 1}`);
-                        const typeDisplay = m.type && m.type.trim() ? ` [${m.type.trim()}]` : '';
-                        const timingDisplay = m.timing && m.timing.trim() ? ` [${m.timing.trim()}]` : '';
-                        const durationDisplay = activeInvoice?.medicineDuration ? ` (${activeInvoice.medicineDuration})` : '';
-                        return `<tr><td>${medName}${typeDisplay}${timingDisplay}${durationDisplay}</td><td style="text-align: right; font-weight: 700;">₹${Number(m.amount).toFixed(2)}</td></tr>`;
-                      }).join('')
-                      : `<tr><td>Medicine Fee${activeInvoice?.medicineDuration ? ` (${activeInvoice?.medicineDuration})` : ''}</td><td style="text-align: right; font-weight: 700;">₹${Number(activeInvoice?.medicineFee).toFixed(2)}</td></tr>`}
+                ? activeInvoice.medicines.map((m: any, idx: number) => {
+                  const medName = m.name && m.name.trim() ? m.name.trim() : (activeInvoice.medicines.length === 1 ? 'Medicine Fee' : `Medicine ${idx + 1}`);
+                  const typeDisplay = m.type && m.type.trim() ? ` [${m.type.trim()}]` : '';
+                  const timingDisplay = m.timing && m.timing.trim() ? ` [${m.timing.trim()}]` : '';
+                  const durationDisplay = activeInvoice?.medicineDuration ? ` (${activeInvoice.medicineDuration})` : '';
+                  return `<tr><td>${medName}${typeDisplay}${timingDisplay}${durationDisplay}</td><td style="text-align: right; font-weight: 700;">₹${Number(m.amount).toFixed(2)}</td></tr>`;
+                }).join('')
+                : `<tr><td>Medicine Fee${activeInvoice?.medicineDuration ? ` (${activeInvoice?.medicineDuration})` : ''}</td><td style="text-align: right; font-weight: 700;">₹${Number(activeInvoice?.medicineFee).toFixed(2)}</td></tr>`}
                   `
-                  : `<tr><td>Consultation Fee</td><td style="text-align: right; font-weight: 700;">₹${totalAmount}</td></tr>`
-                )
+              : `<tr><td>Consultation Fee</td><td style="text-align: right; font-weight: 700;">₹${totalAmount}</td></tr>`
             )
+          )
     }
           ${Number(activeInvoice?.dietFee) > 0 ? `<tr><td>Diet & Nutrition Fee</td><td style="text-align: right; font-weight: 700;">₹${Number(activeInvoice?.dietFee).toFixed(2)}</td></tr>` : ''}
           ${Number(activeInvoice?.otherCharges) > 0 ? `<tr><td>Other Charges</td><td style="text-align: right; font-weight: 700;">₹${Number(activeInvoice?.otherCharges).toFixed(2)}</td></tr>` : ''}
@@ -1451,7 +1451,7 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
           clearInterval(interval);
           executeCheckoutProcess();
         }
-      } catch (_) {}
+      } catch (_) { }
     }, 4000);
     return () => clearInterval(interval);
   }, [selectedPaymentMode, upiQrData?.qrId, upiQrPaid]);
@@ -1517,7 +1517,7 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
           setSplitUpiQrPaid(true);
           clearInterval(interval);
         }
-      } catch (_) {}
+      } catch (_) { }
     }, 4000);
     return () => clearInterval(interval);
   }, [isSplitUpi, splitUpiQrData?.qrId, splitUpiQrPaid]);
@@ -1721,6 +1721,20 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
         await updateDoc(doc(activeDb, 'appointments', docId), payload).catch(() => { });
         await updateDoc(doc(activeDb, 'allpatients', docId), payload).catch(() => { });
         await updateDoc(doc(activeDb, 'patients', docId), payload).catch(() => { });
+
+        // Atomically increment branch target reached in real time
+        if (totalAmountDue > 0) {
+          const rawBranch = String(selectedPatientForPayment.branch || selectedPatientForPayment.branchName || 'kphb').toLowerCase();
+          const bKey = rawBranch.includes('nalla') ? 'nallagandla'
+            : rawBranch.includes('dilshuk') ? 'dilshuknagar'
+              : rawBranch.includes('chanda') ? 'chandanagar'
+                : 'kphb';
+
+          updateDoc(doc(activeDb, 'branchTargets', bKey), {
+            targetReached: increment(totalAmountDue),
+            updatedAt: new Date().toISOString()
+          }).catch(() => { });
+        }
       }
 
       // Ensure prescription record is saved in prescriptions collection
@@ -1888,6 +1902,23 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
         }
       }).catch(err => console.error('WhatsApp invoice notification error:', err));
 
+      // Trigger SMS Payment Receipt (DLT Template)
+      const payPatientPhone = selectedPatientForPayment.phone || selectedPatientForPayment.phoneNumber || '';
+      const payPatientName = selectedPatientForPayment.patientName || selectedPatientForPayment.name || 'Patient';
+      const payReceiptNo = selectedPatientForPayment.id ? String(selectedPatientForPayment.id).substring(0, 8).toUpperCase() : ('RCP-' + Math.random().toString(36).substring(2, 8).toUpperCase());
+      const payBranch = selectedPatientForPayment.branch || 'KPHB';
+
+      if (payPatientPhone) {
+        sendPaymentReceiptSMS(
+          payPatientPhone,
+          payPatientName,
+          totalAmountDue,
+          payReceiptNo,
+          new Date().toLocaleDateString('en-GB'),
+          payBranch
+        ).catch(err => console.warn('SMS payment receipt notification notice:', err));
+      }
+
       // Trigger Payment Notification in Firestore for HR (all branches) & Branch Reception
       createPaymentNotificationInFirestore({
         patientName: selectedPatientForPayment.patientName || selectedPatientForPayment.name || 'Patient',
@@ -1904,18 +1935,11 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
 
       // Automatically sync dynamic target reach and percentage for this branch to Firestore
       const targetBranch = selectedPatientForPayment.branch || selectedPatientForPayment.targetBranch || selectedPatientForPayment.branchName;
-      if (targetBranch) {
+      if (targetBranch && totalAmountDue > 0) {
         try {
-          const liveApps = receptionDataStore.getAppointments();
-          const livePkgs = receptionDataStore.getPackageMembers();
-          const updatedApps = liveApps.map(a => a.id === selectedPatientForPayment.id ? { ...a, ...payload } : a);
-          if (!updatedApps.some(a => a.id === selectedPatientForPayment.id)) {
-            updatedApps.push(completedInvoice);
-          }
-          const calcRes = calculateRealBranchRevenue(targetBranch, updatedApps, livePkgs);
-          syncBranchTargetToFirestore(targetBranch, calcRes.targetReached, calcRes.monthlyTarget).catch(() => { });
+          incrementBranchTargetRevenue(targetBranch, totalAmountDue).catch(() => { });
         } catch (syncErr) {
-          console.warn('Branch target sync notice (mobile):', syncErr);
+          console.warn('Branch target increment notice (mobile):', syncErr);
         }
       }
 

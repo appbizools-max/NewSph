@@ -815,6 +815,20 @@ export const AllPatientsPage: React.FC<AllPatientsPageProps> = ({ currentBranch 
                               {visitState.badgeText}
                             </span>
                           )}
+                          {visitState?.isApp && (
+                            <span style={{
+                              background: '#f3e8ff',
+                              color: '#7e22ce',
+                              border: '1px solid #d8b4fe',
+                              padding: '1px 6px',
+                              borderRadius: '4px',
+                              fontSize: '10px',
+                              fontWeight: 800,
+                              letterSpacing: '0.03em'
+                            }}>
+                              APP
+                            </span>
+                          )}
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '3px' }}>
                           <span style={{

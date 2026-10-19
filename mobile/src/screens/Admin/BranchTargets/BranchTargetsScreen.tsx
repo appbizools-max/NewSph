@@ -6,10 +6,10 @@ import { receptionDataStore } from '../../../utils/receptionDataStore';
 import { calculateRealBranchRevenue, syncBranchTargetToFirestore } from '../../../utils/branchRevenueCalculator';
 
 const DEFAULT_BRANCH_TARGETS = [
-  { id: 'kphb', name: 'KPHB Branch', monthlyTarget: 0, targetReached: 0 },
-  { id: 'nallagandla', name: 'Nallagandla Branch', monthlyTarget: 0, targetReached: 0 },
-  { id: 'dilshuknagar', name: 'Dilshuknagar Branch', monthlyTarget: 0, targetReached: 0 },
-  { id: 'chandanagar', name: 'Chandanagar Branch', monthlyTarget: 0, targetReached: 0 },
+  { id: 'kphb', name: 'KPHB Branch', monthlyTarget: 725000, targetReached: 0 },
+  { id: 'nallagandla', name: 'Nallagandla Branch', monthlyTarget: 325000, targetReached: 0 },
+  { id: 'dilshuknagar', name: 'Dilshuknagar Branch', monthlyTarget: 225000, targetReached: 0 },
+  { id: 'chandanagar', name: 'Chandanagar Branch', monthlyTarget: 550000, targetReached: 0 },
 ];
 
 export const BranchTargetsScreen: React.FC = () => {
@@ -17,34 +17,6 @@ export const BranchTargetsScreen: React.FC = () => {
   const [selectedBranch, setSelectedBranch] = useState<any>(null);
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [targetInput, setTargetInput] = useState('');
-
-  // Subscribe to real-time collections via receptionDataStore to calculate live revenue
-  useEffect(() => {
-    receptionDataStore.startListeners();
-    const unsub = receptionDataStore.subscribe((state) => {
-      const appts = state.appointments;
-      const pkgs = state.packageMembersList;
-
-      setBranchTargets((prev) =>
-        prev.map((b) => {
-          const res = calculateRealBranchRevenue(b.name, appts, pkgs, b.monthlyTarget);
-          if (res.targetReached > (b.targetReached || 0)) {
-            if (res.monthlyTarget > 0) {
-              syncBranchTargetToFirestore(getSafeDb(), b.name, res.targetReached, res.monthlyTarget).catch(() => {});
-            } else {
-              syncBranchTargetToFirestore(getSafeDb(), b.name, res.targetReached).catch(() => {});
-            }
-          }
-          return {
-            ...b,
-            monthlyTarget: b.monthlyTarget > 0 ? b.monthlyTarget : res.monthlyTarget,
-            targetReached: Math.max(b.targetReached || 0, res.targetReached),
-          };
-        })
-      );
-    });
-    return () => unsub();
-  }, []);
 
   useEffect(() => {
     const firestoreDb = getSafeDb();
@@ -60,12 +32,12 @@ export const BranchTargetsScreen: React.FC = () => {
 
           setBranchTargets((prev) =>
             prev.map((b) => {
-              const live = liveMap[b.id] || liveMap[b.name.toLowerCase().replace(/\s*branch$/i, '')];
+              const live = liveMap[b.id.toLowerCase()] || liveMap[b.name.toLowerCase().replace(/\s*branch$/i, '')];
               if (live) {
                 return {
                   ...b,
-                  monthlyTarget: Number(live.monthlyTarget) || 0,
-                  targetReached: Number(live.targetReached) || 0,
+                  monthlyTarget: Number(live.monthlyTarget) || b.monthlyTarget,
+                  targetReached: live.targetReached !== undefined ? Number(live.targetReached) : b.targetReached,
                 };
               }
               return b;

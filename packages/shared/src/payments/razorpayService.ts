@@ -50,31 +50,21 @@ export interface QrCodeResult {
  * (Google Pay, PhonePe, Paytm) directly WITHOUT redirecting to a browser or asking for contact details!
  */
 export async function createRazorpayPaymentQr(params: CreateQrCodeParams): Promise<QrCodeResult> {
-  const amountPaise = Math.round(params.amount * 100);
   const patient = params.patientName || 'Patient';
   const branch = params.branch || 'Spiritual Homeopathy';
   const invoiceId = params.invoiceId || `INV-${Date.now().toString().slice(-6)}`;
   const description = params.description || `Consultation Fee - ${patient}`;
   const authHeader = getAuthHeader();
 
-  // 1. Primary Method: Live Razorpay Official Payment Link (Option 1)
-  // Fully active, verified & supported across all UPI apps (GPay, PhonePe, Paytm), RuPay/Visa/MasterCard & Netbanking
+  // 1. Primary Method: Razorpay Smart Collect Dynamic UPI VPA
+  // Creates a dedicated ICICI VPA registered under SPIRITUAL HOMEO PRIVATE LIMITED.
+  // Standard NPCI upi://pay URI ensures 100% compatibility with all UPI scanner apps (GPay, PhonePe, Paytm, BHIM).
   try {
-    const plinkPayload = {
-      amount: amountPaise,
-      currency: 'INR',
-      accept_partial: false,
-      description: description.substring(0, 40),
-      upi_link: true,
-      customer: {
-        name: patient,
-        contact: params.phone ? (params.phone.startsWith('+91') ? params.phone : `+91${params.phone.replace(/\D/g, '').slice(-10)}`) : undefined
+    const vaPayload = {
+      receivers: {
+        types: ['vpa']
       },
-      notify: {
-        sms: false,
-        email: false,
-        whatsapp: false
-      },
+      description: description.substring(0, 30),
       notes: {
         patientName: patient,
         branch: branch,
@@ -82,46 +72,52 @@ export async function createRazorpayPaymentQr(params: CreateQrCodeParams): Promi
       }
     };
 
-    const plinkRes = await fetch(getRazorpayApiUrl('/payment_links'), {
+    const vaRes = await fetch(getRazorpayApiUrl('/virtual_accounts'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': authHeader
       },
-      body: JSON.stringify(plinkPayload)
+      body: JSON.stringify(vaPayload)
     });
 
-    if (plinkRes.ok) {
-      const pData = await plinkRes.json();
-      const shortUrl = pData.short_url;
-      // High-resolution clean QR Code encoding the official live payment gateway link
-      const dynamicQrImg = `https://api.qrserver.com/v1/create-qr-code/?size=350x350&margin=10&data=${encodeURIComponent(shortUrl)}`;
+    if (vaRes.ok) {
+      const vaData = await vaRes.json();
+      const vpaReceiver = vaData.receivers?.find((r: any) => r.entity === 'vpa' && r.address);
+      if (vpaReceiver && vpaReceiver.address) {
+        const vpaAddress = vpaReceiver.address;
+        const merchantName = encodeURIComponent(vaData.name || 'Spiritual Homeo Private Limited');
+        const cleanNote = encodeURIComponent(description.slice(0, 25));
+        const upiUri = `upi://pay?pa=${vpaAddress}&pn=${merchantName}&am=${params.amount}&cu=INR&tn=${cleanNote}`;
+        const dynamicQrImg = `https://api.qrserver.com/v1/create-qr-code/?size=350x350&margin=10&data=${encodeURIComponent(upiUri)}`;
 
-      return {
-        success: true,
-        qrId: pData.id,
-        imageUrl: dynamicQrImg,
-        paymentUrl: shortUrl,
-        amount: params.amount,
-        status: 'active',
-        source: 'payment_link'
-      };
+        return {
+          success: true,
+          qrId: vaData.id,
+          imageUrl: dynamicQrImg,
+          paymentUrl: upiUri,
+          amount: params.amount,
+          status: 'active',
+          source: 'upi_vpa'
+        };
+      }
     } else {
-      const errData = await plinkRes.json();
-      console.warn('[Razorpay] payment_links creation notice:', errData);
+      const errData = await vaRes.json().catch(() => ({}));
+      console.warn('[Razorpay] virtual_account notice:', errData);
     }
-  } catch (plinkErr) {
-    console.warn('[Razorpay] payment_links fallback notice:', plinkErr);
+  } catch (vaErr) {
+    console.warn('[Razorpay] virtual_account fallback notice:', vaErr);
   }
 
-  // 2. Direct Clinic UPI Intent Fallback
-  const upiUri = `upi://pay?pa=spiritualhomeopathy@icici&pn=Spiritual%20Homeopathy&am=${params.amount}&cu=INR&tn=${encodeURIComponent(description)}`;
-  const upiQrImg = `https://api.qrserver.com/v1/create-qr-code/?size=350x350&margin=10&data=${encodeURIComponent(upiUri)}`;
+  // 2. Direct Clinic Verified UPI Fallback
+  // Formatted strictly as standard NPCI UPI URI so PhonePe, GPay, Paytm can scan it without error
+  const fallbackUpiUri = `upi://pay?pa=spiritualhomeopathy@icici&pn=Spiritual%20Homeopathy&am=${params.amount}&cu=INR&tn=${encodeURIComponent(description.slice(0, 25))}`;
+  const upiQrImg = `https://api.qrserver.com/v1/create-qr-code/?size=350x350&margin=10&data=${encodeURIComponent(fallbackUpiUri)}`;
 
   return {
     success: true,
     imageUrl: upiQrImg,
-    paymentUrl: upiUri,
+    paymentUrl: fallbackUpiUri,
     amount: params.amount,
     status: 'active',
     source: 'upi_intent'
@@ -286,14 +282,16 @@ export function loadRazorpayScript(): Promise<boolean> {
 }
 
 /**
- * Launches the official Razorpay Card Checkout modal (for Web)
+ * Launches the official Razorpay Standard Gateway Checkout modal (for Web)
+ * Supports UPI (Google Pay, PhonePe, Paytm), Razorpay's official verified QR, Cards, & Netbanking
  */
-export async function launchRazorpayCardCheckout(options: {
+export async function launchRazorpayStandardCheckout(options: {
   amount: number;
   patientName?: string;
   phone?: string;
   branch?: string;
   invoiceId?: string;
+  description?: string;
   onSuccess: (paymentId: string) => void;
   onError?: (err: any) => void;
 }): Promise<boolean> {
@@ -311,13 +309,13 @@ export async function launchRazorpayCardCheckout(options: {
       amount: Math.round(options.amount * 100),
       currency: 'INR',
       name: 'Spiritual Homeopathy',
-      description: `Card Payment - ${options.patientName || 'Patient'}`,
+      description: options.description || `Payment - ${options.patientName || 'Patient'}`,
       prefill: {
         name: options.patientName || '',
         contact: options.phone ? options.phone.replace(/\D/g, '').slice(-10) : ''
       },
       notes: {
-        paymentType: 'card',
+        paymentType: 'standard_checkout',
         patientName: options.patientName || '',
         branch: options.branch || '',
         invoiceId: options.invoiceId || ''
@@ -327,7 +325,7 @@ export async function launchRazorpayCardCheckout(options: {
       },
       modal: {
         ondismiss: function () {
-          console.log('[Razorpay] Card checkout dismissed');
+          console.log('[Razorpay] Checkout modal dismissed');
         }
       },
       handler: function (response: any) {
@@ -352,3 +350,8 @@ export async function launchRazorpayCardCheckout(options: {
     return false;
   }
 }
+
+/**
+ * Backward compatibility alias
+ */
+export const launchRazorpayCardCheckout = launchRazorpayStandardCheckout;

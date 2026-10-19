@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "81822616559",
+    "project_id": "spiritual-homeopathy-3b552",
+    "storage_bucket": "spiritual-homeopathy-3b552.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:81822616559:android:5c0f14d04efe22a187841a",
+        "android_client_info": {
+          "package_name": "com.spiritualhomeo.staff"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBpWSTHGNKgBLKu6I2jS4RYR2zcwtHigx8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:81822616559:android:110e5ec05893358e87841a",
+        "android_client_info": {
+          "package_name": "com.spiritualhomeopatientstaff"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBpWSTHGNKgBLKu6I2jS4RYR2zcwtHigx8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -51,7 +51,7 @@ export function initFirebase(customConfig?: FirebaseConfigOptions) {
       }
       try {
         db = initializeFirestore(app, {
-          experimentalForceLongPolling: true,
+          experimentalAutoDetectLongPolling: true,
         });
       } catch {
         db = getFirestore(app);

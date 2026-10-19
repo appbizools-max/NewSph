@@ -45,7 +45,7 @@ export const DOCTOR_MEDICINE_TYPES = [
   'Mother Tincture',
   'Ointment',
   'Other'
-];
+]
 export const DoctorDashboardPage: React.FC<DoctorDashboardPageProps> = ({
   doctorCategory = 'Head Doctor',
   doctorName = 'Dr. Prashanth K Vaidya',

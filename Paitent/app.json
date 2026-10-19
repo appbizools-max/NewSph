@@ -1,0 +1,58 @@
+{
+  "expo": {
+    "name": "Spiritual Homeo Patient",
+    "slug": "sph-patient-app",
+    "version": "1.0.2",
+    "orientation": "portrait",
+    "icon": "./assets/App icon.png",
+    "userInterfaceStyle": "light",
+    "androidStatusBar": {
+      "backgroundColor": "#00000000",
+      "barStyle": "dark-content",
+      "translucent": true
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.spiritualhomeo.patient",
+      "buildNumber": "2",
+      "googleServicesFile": "./GoogleService-Info.plist",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.spiritualhomeopatientstaff",
+      "versionCode": 5,
+      "googleServicesFile": "./google-services.json",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/App icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "permissions": [
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "POST_NOTIFICATIONS"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "@react-native-community/datetimepicker",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/Noti icon.png",
+          "color": "#258ec8"
+        }
+      ],
+      "expo-sharing"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "4ea9d82b-2181-4309-833a-306ae03b3c8e"
+      }
+    }
+  }
+}

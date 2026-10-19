@@ -98,7 +98,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
   const [liveStaffChips, setLiveStaffChips] = useState<any[]>([]);
   const [verifiedAuthData, setVerifiedAuthData] = useState<LoginSuccessData | null>(null);
   const [countdown, setCountdown] = useState<number>(30);
-  const [sentOtp, setSentOtp] = useState<string>('1234');
+  const [sentOtp, setSentOtp] = useState<string>('');
   const [otpExpiresAt, setOtpExpiresAt] = useState<number>(0);
 
   useEffect(() => {
@@ -317,20 +317,20 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
     }
 
     const generatedOtp = generate4DigitOtp();
-    const expiry = Date.now() + 30 * 1000;
+    const expiry = Date.now() + 5 * 60 * 1000; // 5 minutes validity
 
     setSentOtp(generatedOtp);
     setOtpExpiresAt(expiry);
     setVerifiedAuthData(authData);
 
-    // 1. INSTANTLY transition to OTP step (0ms delay! No loading spinner!)
+    // 1. Transition to OTP step with empty input
     setIsSubmitting(false);
     setOtpSent(true);
-    setOtpCode('1234');
+    setOtpCode('');
     setCountdown(30);
-    setSmsNotice(`Sending verification code to +91 ${clean10}... (Default OTP: 1234)`);
+    setSmsNotice(`Sending verification code to +91 ${clean10}...`);
 
-    // 2. Save OTP to Firestore in background for audit
+    // 2. Save OTP to Firestore in background for audit & verification
     const activeDb = getSafeDb();
     if (activeDb && clean10) {
       setDoc(doc(activeDb, 'auth_otps', clean10), {
@@ -345,45 +345,44 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
       }).catch(e => console.warn('Error saving background OTP to Firestore:', e));
     }
 
-    // 3. Dispatch SMS in background without blocking UI
+    // 3. Dispatch real SMS via SMS gateway
     sendSmsOtp(clean10, generatedOtp).then(smsResult => {
       if (smsResult.success) {
-        setSmsNotice(`A 4-digit verification code has been dispatched via SMS to +91 ${clean10}. (Default OTP: 1234)`);
+        setSmsNotice(`A 4-digit verification code has been dispatched via SMS to +91 ${clean10}.`);
       } else {
-        setSmsNotice(`SMS Dispatch: ${smsResult.message}. You can use default OTP 1234.`);
+        setSmsNotice(`SMS Dispatch: ${smsResult.message}`);
       }
     }).catch(() => {
-      setSmsNotice(`You can use default OTP 1234 to proceed.`);
+      setSmsNotice(`SMS dispatch failed. Please request a new OTP.`);
     });
   };
 
-  // VERIFY 4-DIGIT REAL SMS OTP (Instant 0ms in-memory verification, zero loading delay!)
+  // VERIFY 4-DIGIT REAL SMS OTP
   const handleVerifyOTP = async () => {
-    const cleanOtp = otpCode.trim() || '1234';
-    if (!cleanOtp) {
-      Alert.alert('OTP Required', 'Please enter the 4-digit OTP received via SMS (or enter 1234).');
+    const cleanOtp = otpCode.trim();
+    if (!cleanOtp || cleanOtp.length !== 4) {
+      Alert.alert('OTP Required', 'Please enter the 4-digit OTP received via SMS.');
       return;
     }
 
     const rawInput = phoneNumber.trim();
     const { clean10 } = normalizePhoneForSms(rawInput);
 
-    // 1. Check expiration if user typed SMS OTP
-    const isDefault = cleanOtp === '1234';
-    if (!isDefault && otpExpiresAt > 0 && Date.now() > otpExpiresAt) {
-      Alert.alert('OTP Expired', 'The OTP has expired (30-second validity). Please request a new OTP or enter 1234.');
+    // 1. Check expiration (5 minutes validity)
+    if (otpExpiresAt > 0 && Date.now() > otpExpiresAt) {
+      Alert.alert('OTP Expired', 'The OTP has expired. Please click Resend OTP to receive a new code.');
       return;
     }
 
-    // 2. Instant In-Memory Match
-    let isOtpValid = isDefault || (sentOtp && cleanOtp === sentOtp);
+    // 2. In-Memory Match against dispatched SMS OTP
+    let isOtpValid = Boolean(sentOtp && cleanOtp === sentOtp);
 
-    // 3. Fast fallback to Firestore OTP check with 1s timeout
+    // 3. Fallback to Firestore OTP check with 1.5s timeout
     if (!isOtpValid && clean10) {
       const activeDb = getSafeDb();
       if (activeDb) {
         try {
-          const timeoutPromise = new Promise<null>(resolve => setTimeout(() => resolve(null), 1000));
+          const timeoutPromise = new Promise<null>(resolve => setTimeout(() => resolve(null), 1500));
           const otpSnap = await Promise.race([
             getDoc(doc(activeDb, 'auth_otps', clean10)),
             timeoutPromise
@@ -401,7 +400,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onLoginSuccess }) => {
     }
 
     if (!isOtpValid) {
-      Alert.alert('Invalid OTP', 'The OTP code is incorrect. Please check your SMS or enter default OTP 1234.');
+      Alert.alert('Invalid OTP', 'The OTP code is incorrect. Please check your SMS and enter the correct 4-digit code.');
       return;
     }
 

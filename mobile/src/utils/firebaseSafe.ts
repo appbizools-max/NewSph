@@ -18,6 +18,7 @@ import {
   orderBy,
   arrayUnion,
   runTransaction,
+  increment,
   Firestore
 } from 'firebase/firestore';
 
@@ -44,7 +45,7 @@ export function getSafeDb(): Firestore {
     const app = existing || initializeApp(firebaseConfig, 'sphMobileApp');
     try {
       _mobileDb = initializeFirestore(app, {
-        experimentalForceLongPolling: true,
+        experimentalAutoDetectLongPolling: true,
       });
     } catch {
       _mobileDb = getFirestore(app);
@@ -79,5 +80,6 @@ export {
   serverTimestamp,
   orderBy,
   arrayUnion,
-  runTransaction
+  runTransaction,
+  increment
 };

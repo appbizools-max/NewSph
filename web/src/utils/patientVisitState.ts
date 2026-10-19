@@ -10,6 +10,8 @@ export interface PatientVisitState {
   daysRemaining?: number;
   isCoveredZeroFee: boolean;
   tooltip: string;
+  isApp?: boolean;
+  appBadgeText?: string;
 }
 /**
  * Safely parse any date value (string, number, Date, Firestore Timestamp with toDate/seconds)
@@ -291,6 +293,70 @@ function getOrBuildIndex(allRecords: any[]) {
 }
 
 /**
+ * Detects whether an appointment or patient record originated from the Patient App.
+ */
+export function isAppAppointment(appointment: any): boolean {
+  if (!appointment) return false;
+  if (
+    appointment.isAppBooking === true ||
+    appointment.isApp === true ||
+    appointment.raw?.isAppBooking === true ||
+    appointment.raw?.isApp === true
+  ) {
+    return true;
+  }
+
+  const src = String(
+    appointment.source ||
+    appointment.raw?.source ||
+    appointment.bookingSource ||
+    appointment.raw?.bookingSource ||
+    appointment.channel ||
+    appointment.raw?.channel ||
+    appointment.bookingChannel ||
+    appointment.raw?.bookingChannel ||
+    ''
+  ).toLowerCase().trim();
+
+  const type = String(
+    appointment._type ||
+    appointment.raw?._type ||
+    appointment.type ||
+    appointment.raw?.type ||
+    appointment.bookingType ||
+    appointment.raw?.bookingType ||
+    ''
+  ).toLowerCase().trim();
+
+  if (
+    src === 'userapp' ||
+    src === 'patient app' ||
+    src === 'patientapp' ||
+    src === 'patient' ||
+    src === 'app' ||
+    src === 'mobile app' ||
+    src === 'online' ||
+    src.includes('userapp') ||
+    src.includes('patient app')
+  ) {
+    return true;
+  }
+
+  if (type === 'online' || type === 'userapp') {
+    return true;
+  }
+
+  const patId = appointment.patientId || appointment.raw?.patientId;
+  if (patId && typeof patId === 'string' && patId.length >= 20 && !patId.startsWith('staff_') && !patId.startsWith('rec_') && !patId.startsWith('doc_')) {
+    if (src !== 'walk-in' && src !== 'walkin' && src !== 'reception' && src !== 'desk' && src !== 'manual') {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Determines whether a patient is NEW, IN_DUR (In-Duration), REVISIT, or PKG (Package Member).
  * Checks strictly across all collections:
  * - If phone number, patient ID, or patient name matches any active package -> PKG
@@ -312,13 +378,15 @@ export function getPatientVisitState(
       badgeColor: '#1d4ed8',
       badgeBorder: '#93c5fd',
       isCoveredZeroFee: false,
-      tooltip: 'First-time Patient Visit'
+      tooltip: 'First-time Patient Visit',
+      isApp: false
     };
   }
 
+  const isAppFlag = isAppAppointment(appointment) ? 'app' : 'std';
   const appCleanName = cleanPatientName(extractName(appointment));
   const appPhone = extractPhone(appointment);
-  const cacheKey = `${appointment.id || (appointment as any).docId || ''}_${appCleanName}_${appPhone}_${appointment.updatedAt || appointment.appointmentDate || ''}_${appointment.status || ''}_${appointment.paymentStatus || ''}`;
+  const cacheKey = `${appointment.id || (appointment as any).docId || ''}_${appCleanName}_${appPhone}_${appointment.updatedAt || appointment.appointmentDate || ''}_${appointment.status || ''}_${appointment.paymentStatus || ''}_${isAppFlag}`;
   if (visitStateResultCache.has(cacheKey)) {
     return visitStateResultCache.get(cacheKey)!;
   }
@@ -338,6 +406,8 @@ function calculatePatientVisitState(
   allRecords: any[] = [],
   packageMembers: any[] = []
 ): PatientVisitState {
+  const isApp = isAppAppointment(appointment);
+  const appBadge = isApp ? 'APP' : undefined;
   const appPhone = extractPhone(appointment);
   const appPatientDocId = extractDocId(appointment);
   const appPatientName = extractName(appointment);
@@ -359,7 +429,9 @@ function calculatePatientVisitState(
       badgeBorder: '#fde68a',
       durationLabel: appointment.packageDuration || 'Package',
       isCoveredZeroFee: true,
-      tooltip: `Active Package Member (${appointment.packageDuration || 'Package'})`
+      tooltip: `Active Package Member (${appointment.packageDuration || 'Package'})`,
+      isApp,
+      appBadgeText: appBadge
     };
   }
 
@@ -380,7 +452,9 @@ function calculatePatientVisitState(
           expiryDate: matchedPkg.expiryDate,
           durationLabel: matchedPkg.duration || 'Package',
           isCoveredZeroFee: true,
-          tooltip: `Active Package Member (Valid until ${matchedPkg.expiryDate ? new Date(matchedPkg.expiryDate).toLocaleDateString('en-GB') : 'Active'})`
+          tooltip: `Active Package Member (Valid until ${matchedPkg.expiryDate ? new Date(matchedPkg.expiryDate).toLocaleDateString('en-GB') : 'Active'})`,
+          isApp,
+          appBadgeText: appBadge
         };
       }
     }
@@ -396,7 +470,9 @@ function calculatePatientVisitState(
       badgeColor: '#1d4ed8',
       badgeBorder: '#93c5fd',
       isCoveredZeroFee: false,
-      tooltip: 'First-time New Patient (Newly Created Profile)'
+      tooltip: 'First-time New Patient (Newly Created Profile)',
+      isApp,
+      appBadgeText: appBadge
     };
   }
 
@@ -428,7 +504,9 @@ function calculatePatientVisitState(
         durationLabel: durLabel,
         daysRemaining: daysLeft,
         isCoveredZeroFee: true,
-        tooltip: `In-Duration (${durLabel} • Valid until ${curExpiry.toLocaleDateString('en-GB')})`
+        tooltip: `In-Duration (${durLabel} • Valid until ${curExpiry.toLocaleDateString('en-GB')})`,
+        isApp,
+        appBadgeText: appBadge
       };
     }
   }
@@ -540,7 +618,9 @@ function calculatePatientVisitState(
         badgeBorder: '#fde68a',
         durationLabel: pkgMatch.packageDuration || 'Package',
         isCoveredZeroFee: true,
-        tooltip: `Active Package Member (${pkgMatch.packageDuration || 'Package'})`
+        tooltip: `Active Package Member (${pkgMatch.packageDuration || 'Package'})`,
+        isApp,
+        appBadgeText: appBadge
       };
     }
 
@@ -580,7 +660,9 @@ function calculatePatientVisitState(
             durationLabel: durLabel,
             daysRemaining: daysLeft,
             isCoveredZeroFee: true,
-            tooltip: `In-Duration (${durLabel} • Valid until ${recExpiry.toLocaleDateString('en-GB')})`
+            tooltip: `In-Duration (${durLabel} • Valid until ${recExpiry.toLocaleDateString('en-GB')})`,
+            isApp,
+            appBadgeText: appBadge
           };
         } else {
           // The newest matching record's duration has expired! Stop scanning older records.
@@ -598,7 +680,9 @@ function calculatePatientVisitState(
       badgeColor: '#c2410c',
       badgeBorder: '#fed7aa',
       isCoveredZeroFee: false,
-      tooltip: 'Follow-up Revisit (Matched in Clinic Records)'
+      tooltip: 'Follow-up Revisit (Matched in Clinic Records)',
+      isApp,
+      appBadgeText: appBadge
     };
   }
 
@@ -642,7 +726,9 @@ function calculatePatientVisitState(
       badgeColor: '#c2410c',
       badgeBorder: '#fed7aa',
       isCoveredZeroFee: false,
-      tooltip: 'Follow-up Revisit (Existing Clinic Patient)'
+      tooltip: 'Follow-up Revisit (Existing Clinic Patient)',
+      isApp,
+      appBadgeText: appBadge
     };
   }
 
@@ -661,7 +747,9 @@ function calculatePatientVisitState(
       badgeColor: '#c2410c',
       badgeBorder: '#fed7aa',
       isCoveredZeroFee: false,
-      tooltip: `Follow-up Revisit (Registered Clinic ID: ${existingReg.toUpperCase()})`
+      tooltip: `Follow-up Revisit (Registered Clinic ID: ${existingReg.toUpperCase()})`,
+      isApp,
+      appBadgeText: appBadge
     };
   }
 
@@ -674,6 +762,8 @@ function calculatePatientVisitState(
     badgeColor: '#1d4ed8',
     badgeBorder: '#93c5fd',
     isCoveredZeroFee: false,
-    tooltip: 'First-time New Patient (No matching record in database)'
+    tooltip: 'First-time New Patient (No matching record in database)',
+    isApp,
+    appBadgeText: appBadge
   };
 }

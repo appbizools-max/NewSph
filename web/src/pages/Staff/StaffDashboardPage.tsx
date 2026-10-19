@@ -10,7 +10,8 @@ import { db, StaffAttendanceRecord, StaffLeaveRequest, StaffDailyReport } from '
 import {
   createStaffPunchInNotificationInFirestore,
   createStaffPunchOutNotificationInFirestore,
-  createStaffDailyReportNotificationInFirestore
+  createStaffDailyReportNotificationInFirestore,
+  createStaffLeaveRequestNotificationInFirestore
 } from '../../utils/fcmWebTrigger';
 
 interface StaffDashboardPageProps {
@@ -441,6 +442,19 @@ export const StaffDashboardPage: React.FC<StaffDashboardPageProps> = ({
           createdAt: new Date().toISOString()
         };
         await addDoc(collection(db, 'leaves'), newLeave);
+
+        // Send push notification to Admin & HR
+        createStaffLeaveRequestNotificationInFirestore({
+          staffName: staffProfile.name,
+          branch: staffProfile.branch,
+          staffId: staffProfile.id,
+          leaveType,
+          fromDate: formattedFromDate,
+          toDate: formattedToDate,
+          daysCount: days,
+          reason: leaveReason.trim(),
+        }).catch(() => {});
+
         alert(`Leave request for ${days} day(s) (${formattedFromDate} to ${formattedToDate}, Joining on ${finalJoiningDate}) submitted to Admin & HR!`);
         setLeaveReason('');
       }

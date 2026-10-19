@@ -19,6 +19,7 @@ import { EmployeeAttendanceReportPage } from './EmployeeAttendance/EmployeeAtten
 import { BranchCleaningPage } from './BranchCleaning/BranchCleaningPage';
 import { AdminFollowUpsPage } from './FollowUps/AdminFollowUpsPage';
 import { createFeeDiscountResponseNotificationInFirestore } from '../../utils/fcmWebTrigger';
+import { receptionDataStore } from '../../utils/receptionDataStore';
 interface AdminDashboardPageProps {
   currentBranch?: string;
   role?: string;
@@ -51,6 +52,34 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({ currentB
   >(getTabFromUrl);
 
   const [isNavCollapsed, setIsNavCollapsed] = useState(false);
+
+  const [adminRevenueLiveData, setAdminRevenueLiveData] = useState<any[]>(() => {
+    try {
+      const pool = receptionDataStore.getAllCollectionsPool();
+      if (pool && pool.length > 0) return pool;
+      return receptionDataStore.getAppointments() || [];
+    } catch (_) {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    try {
+      receptionDataStore.startListeners();
+    } catch (_) {}
+
+    const unsub = receptionDataStore.subscribe((state) => {
+      if (state.allCollectionsPool && state.allCollectionsPool.length > 0) {
+        setAdminRevenueLiveData(state.allCollectionsPool);
+      } else if (state.appointments && state.appointments.length > 0) {
+        setAdminRevenueLiveData(state.appointments);
+      }
+    });
+
+    return () => {
+      unsub();
+    };
+  }, []);
 
   const handleTabChange = (tabId: any) => {
     setActiveTab(tabId);
@@ -657,22 +686,8 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({ currentB
 
     const collectionsToListen = [
       'appointments',
-      'prescriptions',
       'allpatients',
-      'medicine_requests',
-      'patient_profiles',
-      'invoices',
-      'billing',
-      'diet_plans',
-      'followups',
-      'payments',
-      'transactions',
-      'orders',
-      'receipts',
-      'consultations',
-      'daily_collections',
-      'revenue',
-      'bills'
+      'prescriptions'
     ];
 
     const unsubs: Array<() => void> = [];
@@ -686,23 +701,8 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({ currentB
 
       const priorityOrder = [
         'appointments',
-        'prescriptions',
-        'invoices',
-        'billing',
         'allpatients',
-        'patients',
-        'medicine_requests',
-        'patient_profiles',
-        'diet_plans',
-        'followups',
-        'payments',
-        'transactions',
-        'orders',
-        'receipts',
-        'consultations',
-        'daily_collections',
-        'revenue',
-        'bills'
+        'prescriptions'
       ];
 
       for (const colName of priorityOrder) {
@@ -2646,7 +2646,7 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({ currentB
 
         {/* TAB 6: FINANCE, TOTAL & NUTRITION REVENUE */}
         {activeTab === 'finance' && (
-          <AdminTotalRevenuePage liveData={liveAppointments} />
+          <AdminTotalRevenuePage liveData={adminRevenueLiveData} />
         )}
 
         {/* TAB 7: EDIT MEDICINE FORM */}

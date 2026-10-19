@@ -5,7 +5,7 @@ import { RemediesPage } from './pages/Remedies/RemediesPage';
 import { ConsultationPage } from './pages/Consultation/ConsultationPage';
 import { ProfilePage } from './pages/Profile/ProfilePage';
 import { AuthPage, WebLoginSuccessData } from './pages/Auth/AuthPage';
-import { signOutUser, CanonicalBranchId, resolveCanonicalBranchId, AuthUserSession } from '@app/shared';
+import { signOutUser, CanonicalBranchId, resolveCanonicalBranchId, AuthUserSession, db } from '@app/shared';
 
 // Lazy Loaded Role Portals (Loaded on-demand to optimize initial loading)
 const AdminDashboardPage = lazy(() => import('./pages/Admin/AdminDashboardPage').then(m => ({ default: m.AdminDashboardPage })));
@@ -77,6 +77,7 @@ export default function App() {
   const [branchName, setBranchName] = useState(authSession?.branchName || 'KPHB Branch');
   const [branchPhone, setBranchPhone] = useState(authSession?.branchPhone || '+91 90301 76176');
   const [staffId, setStaffId] = useState(authSession?.staffId || '1');
+
 
   // Normalized currentUser Context available to all features
   const currentUser = useMemo(() => ({

@@ -84,7 +84,7 @@ export const DoctorScreen: React.FC<DoctorScreenProps> = ({
             onNavigateTab={onNavigateTab}
           />
         )}
-        {currentTab === 'packages' && isHeadDoctor && <DoctorPackagesScreen />}
+        {currentTab === 'packages' && isHeadDoctor && <DoctorPackagesScreen doctorName={doctorName} />}
         {currentTab === 'revenue' && isHeadDoctor && <DoctorTotalRevenueScreen />}
       </View>
 

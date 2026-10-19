@@ -38,7 +38,6 @@ export interface NotificationItem {
   rejectReason?: string;
   createdAt?: string;
 }
-
 interface NotificationsScreenProps {
   notifications: NotificationItem[];
   readNotiIds: Set<string>;
@@ -183,6 +182,38 @@ export const NotificationsScreen: React.FC<NotificationsScreenProps> = ({
           tagStyle: styles.rejectedTypeTag,
           tagTextStyle: styles.rejectedTypeTagText,
         };
+      case 'staff_leave_request':
+        return {
+          iconName: 'calendar-outline' as const,
+          iconColor: isRead ? '#64748b' : '#ec4899',
+          circleStyle: isRead ? styles.iconCircleRead : styles.iconCircleLeave,
+          title: item.staffName ? `${item.staffName} (Leave)` : 'Leave Application',
+          tagText: 'LEAVE',
+          tagStyle: styles.leaveTypeTag,
+          tagTextStyle: styles.leaveTypeTagText,
+        };
+      case 'fee_discount_request':
+        return {
+          iconName: 'pricetag-outline' as const,
+          iconColor: isRead ? '#64748b' : '#8b5cf6',
+          circleStyle: isRead ? styles.iconCircleRead : styles.iconCircleLogin,
+          title: item.patientName ? `${item.patientName} (Discount Req)` : 'Discount Request',
+          tagText: 'DISCOUNT REQ',
+          tagStyle: styles.discountReqTypeTag,
+          tagTextStyle: styles.discountReqTypeTagText,
+        };
+      case 'fee_discount_response': {
+        const isApproved = item.status === 'approved';
+        return {
+          iconName: (isApproved ? 'checkmark-circle-outline' : 'close-circle-outline') as any,
+          iconColor: isRead ? '#64748b' : (isApproved ? '#16a34a' : '#dc2626'),
+          circleStyle: isRead ? styles.iconCircleRead : (isApproved ? styles.iconCirclePayment : styles.iconCircleRejected),
+          title: item.patientName ? `${item.patientName} (Discount)` : 'Discount Decision',
+          tagText: isApproved ? 'DISCOUNT APPROVED' : 'DISCOUNT REJECTED',
+          tagStyle: isApproved ? styles.paymentTypeTag : styles.rejectedTypeTag,
+          tagTextStyle: isApproved ? styles.paymentTypeTagText : styles.rejectedTypeTagText,
+        };
+      }
       default:
         return {
           iconName: 'calendar-outline' as const,
@@ -534,6 +565,31 @@ const styles = StyleSheet.create({
   },
   iconCircleRead: {
     backgroundColor: '#f1f5f9',
+  },
+  iconCircleLeave: {
+    backgroundColor: '#fce7f3',
+  },
+  leaveTypeTag: {
+    backgroundColor: '#fce7f3',
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 3,
+  },
+  leaveTypeTagText: {
+    fontSize: 8.5,
+    fontWeight: '800',
+    color: '#be185d',
+  },
+  discountReqTypeTag: {
+    backgroundColor: '#ede9fe',
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 3,
+  },
+  discountReqTypeTagText: {
+    fontSize: 8.5,
+    fontWeight: '800',
+    color: '#7c3aed',
   },
   cleaningTypeTag: {
     backgroundColor: '#e0f2fe',

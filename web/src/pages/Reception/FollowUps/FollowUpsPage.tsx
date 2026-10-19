@@ -1600,6 +1600,20 @@ export const FollowUpsPage: React.FC<FollowUpsPageProps> = ({
                             {visitState.badgeText}
                           </span>
                         )}
+                        {visitState?.isApp && (
+                          <span style={{
+                            padding: '1px 6px',
+                            borderRadius: '4px',
+                            fontSize: '10px',
+                            fontWeight: 800,
+                            letterSpacing: '0.03em',
+                            background: '#f3e8ff',
+                            color: '#7e22ce',
+                            border: '1px solid #d8b4fe'
+                          }}>
+                            APP
+                          </span>
+                        )}
                       </div>
                       <div style={{ fontSize: '12px', color: '#64748b', marginTop: '2px' }}>
                         {item.phone} • <span style={{ color: '#0284c7', fontWeight: 700 }}>{item.regId}</span>

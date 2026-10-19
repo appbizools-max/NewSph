@@ -411,6 +411,11 @@ const DoctorPatientCardItem = memo(({
                 </Text>
               </View>
             ) : null}
+            {visitState?.isApp ? (
+              <View style={{ backgroundColor: '#f3e8ff', borderWidth: 1, borderColor: '#d8b4fe', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4 }}>
+                <Text style={{ fontSize: 9.5, fontWeight: '900', color: '#7e22ce' }}>APP</Text>
+              </View>
+            ) : null}
             {patient.visitCount > 1 ? (
               <View style={styles.historyBadge}>
                 <Text style={styles.historyBadgeText}>⏱ {patient.visitCount} Visits</Text>

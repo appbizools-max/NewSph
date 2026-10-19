@@ -1,8 +1,17 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { StyleSheet, Text, View, SafeAreaView, TouchableOpacity, Platform, Alert, BackHandler, ScrollView, ActivityIndicator } from 'react-native';
+import { StyleSheet, Text, View, SafeAreaView, TouchableOpacity, Platform, Alert, BackHandler, ScrollView, ActivityIndicator, LogBox } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+
+LogBox.ignoreLogs([
+  '@firebase/firestore',
+  'WebChannelConnection',
+  'transport errored',
+  'expo-notifications',
+  'Error thrown while updating the device push token',
+  'Network request failed',
+]);
 
 // Auth Screen
 import { AuthScreen, LoginSuccessData } from './src/screens/AuthScreen/AuthScreen';
@@ -133,6 +142,7 @@ function MainApp() {
 
   // Keep-Alive Tab State Preservation across all screens
   const [visitedTabs, setVisitedTabs] = useState<Set<string>>(() => new Set(['reception_dashboard']));
+
 
   useEffect(() => {
     if (activeTab) {
@@ -463,12 +473,18 @@ function MainApp() {
           let shouldInclude = false;
           if (noti.type === 'staff_login' || noti.type === 'staff_logout' || noti.type === 'staff_punch_in' || noti.type === 'staff_punch_out') {
             shouldInclude = isHR;
-          } else if (noti.type === 'staff_report') {
+          } else if (noti.type === 'staff_report' || noti.type === 'staff_leave_request') {
             const isMatchingStaff = userRole === 'staff' && (
               (noti.staffName && userName.toLowerCase().includes(noti.staffName.toLowerCase())) ||
               noti.staffId === staffId
             );
             shouldInclude = isHR || isMatchingStaff;
+          } else if (noti.type === 'fee_discount_request') {
+            // Only HR and Admin receive fee discount requests, NOT Reception
+            shouldInclude = isHR;
+          } else if (noti.type === 'fee_discount_response') {
+            // Reception of that branch and HR get the response
+            shouldInclude = isHR || isBranchReception;
           } else if (noti.type === 'cleaning_submission') {
             // Clinic cleaning uploaded: HR / Admin and Branch Reception get notified
             shouldInclude = isHR || isBranchReception;
@@ -518,12 +534,17 @@ function MainApp() {
             let shouldNotify = false;
             if (noti.type === 'staff_login' || noti.type === 'staff_logout' || noti.type === 'staff_punch_in' || noti.type === 'staff_punch_out') {
               shouldNotify = isHR;
-            } else if (noti.type === 'staff_report') {
+            } else if (noti.type === 'staff_report' || noti.type === 'staff_leave_request') {
               const isMatchingStaff = userRole === 'staff' && (
                 (noti.staffName && userName.toLowerCase().includes(noti.staffName.toLowerCase())) ||
                 noti.staffId === staffId
               );
               shouldNotify = isHR || isMatchingStaff;
+            } else if (noti.type === 'fee_discount_request') {
+              // Only HR and Admin receive fee discount requests, NOT Reception
+              shouldNotify = isHR;
+            } else if (noti.type === 'fee_discount_response') {
+              shouldNotify = isHR || isBranchReception;
             } else if (noti.type === 'cleaning_submission') {
               // Clinic cleaning uploaded: notify HR / Admin and Branch Reception
               shouldNotify = isHR || isBranchReception;
@@ -558,10 +579,13 @@ function MainApp() {
                     noti.type === 'staff_login' ? 'Staff Logged In' :
                       noti.type === 'staff_logout' ? 'Staff Logged Out' :
                         noti.type === 'staff_report' ? 'Daily Report Submitted' :
-                          noti.type === 'cleaning_submission' ? `${noti.branch || 'Branch'} Cleaning Photos Uploaded 📸` :
-                            noti.type === 'cleaning_approved' ? `${noti.branch || 'Branch'} Cleaning Approved ✅` :
-                              noti.type === 'cleaning_rejected' ? `${noti.branch || 'Branch'} Cleaning Rejected ❌` :
-                                noti.type === 'payment' ? 'Payment Received' : 'Appointment Booked'
+                          noti.type === 'staff_leave_request' ? '📝 Staff Leave Application' :
+                            noti.type === 'fee_discount_request' ? '🏷️ Discount Approval Request' :
+                              noti.type === 'fee_discount_response' ? (noti.status === 'approved' ? 'Discount Request Approved ✓' : 'Discount Request Rejected ❌') :
+                                noti.type === 'cleaning_submission' ? `${noti.branch || 'Branch'} Cleaning Photos Uploaded 📸` :
+                                  noti.type === 'cleaning_approved' ? `${noti.branch || 'Branch'} Cleaning Approved ✅` :
+                                    noti.type === 'cleaning_rejected' ? `${noti.branch || 'Branch'} Cleaning Rejected ❌` :
+                                      noti.type === 'payment' ? 'Payment Received' : 'Appointment Booked'
               );
 
               const notiBody = noti.body || (
@@ -570,11 +594,14 @@ function MainApp() {
                     noti.type === 'staff_login' ? `${noti.staffName} logged in at ${noti.branch}` :
                       noti.type === 'staff_logout' ? `${noti.staffName} logged out from ${noti.branch}` :
                         noti.type === 'staff_report' ? `${noti.staffName} submitted Daily Report for ${noti.branch}` :
-                          noti.type === 'cleaning_submission' ? `${noti.photoCount || 5} clinic cleaning photos uploaded from ${noti.branch} for HR inspection.` :
-                            noti.type === 'cleaning_approved' ? `Clinic cleaning approved by ${noti.reviewedBy || 'HR'} for ${noti.branch}. Reception is unlocked.` :
-                              noti.type === 'cleaning_rejected' ? `Cleaning submission for ${noti.branch} rejected by ${noti.reviewedBy || 'HR'}. Please re-upload photos.` :
-                                noti.type === 'payment' ? `Payment of ₹${Number(noti.amount || 0).toLocaleString('en-IN')} received from ${noti.patientName} (${noti.branch})` :
-                                  `Appointment booked for ${noti.patientName} at ${noti.appointmentTime} (${noti.branch})`
+                          noti.type === 'staff_leave_request' ? `${noti.staffName} applied for ${noti.daysCount || 1} day(s) leave` :
+                            noti.type === 'fee_discount_request' ? `Discount requested for ${noti.patientName} (${noti.branch})` :
+                              noti.type === 'fee_discount_response' ? `Discount request for ${noti.patientName} was ${noti.status || 'processed'}` :
+                                noti.type === 'cleaning_submission' ? `${noti.photoCount || 5} clinic cleaning photos uploaded from ${noti.branch} for HR inspection.` :
+                                  noti.type === 'cleaning_approved' ? `Clinic cleaning approved by ${noti.reviewedBy || 'HR'} for ${noti.branch}. Reception is unlocked.` :
+                                    noti.type === 'cleaning_rejected' ? `Cleaning submission for ${noti.branch} rejected by ${noti.reviewedBy || 'HR'}. Please re-upload photos.` :
+                                      noti.type === 'payment' ? `Payment of ₹${Number(noti.amount || 0).toLocaleString('en-IN')} received from ${noti.patientName} (${noti.branch})` :
+                                        `Appointment booked for ${noti.patientName} at ${noti.appointmentTime} (${noti.branch})`
               );
 
               triggerSystemPushNotification(notiTitle, notiBody, noti).catch(() => { });
@@ -756,7 +783,6 @@ function MainApp() {
             <HRScreen currentTab={activeTab} onNavigateTab={navigateToTab} />
           </View>
         )}
-
         {/* Doctor Portal */}
         {userRole === 'doctor' && (
           <View style={{ flex: 1, display: !isExternalOverlay ? 'flex' : 'none' }}>
@@ -768,7 +794,6 @@ function MainApp() {
             />
           </View>
         )}
-
         {/* Staff Portal */}
         {userRole === 'staff' && (
           <View style={{ flex: 1, display: !isExternalOverlay ? 'flex' : 'none' }}>
@@ -780,7 +805,6 @@ function MainApp() {
             />
           </View>
         )}
-
         {/* Patient File View */}
         {(visitedTabs.has('patient_file') || visitedTabs.has('reception_patient_file') || activeTab === 'patient_file' || activeTab === 'reception_patient_file') && selectedPatient && (
           <View style={{ flex: 1, display: (activeTab === 'patient_file' || activeTab === 'reception_patient_file') ? 'flex' : 'none' }}>
@@ -794,7 +818,11 @@ function MainApp() {
               onBack={handleGoBack}
               onSaveConsultation={(payload) => {
                 const fullPatient = { ...selectedPatient, ...payload };
-                if (userRole === 'doctor') {
+                if (selectedPatient?.editPrescriptionOnly || selectedPatient?.disableAmount) {
+                  setSelectedPatient(null);
+                  setActiveTab('all_patients');
+                  Alert.alert('Prescription Updated', 'Prescription details updated successfully without affecting payment.');
+                } else if (userRole === 'doctor') {
                   setSelectedPatient(null);
                   setActiveTab('doctor');
                   Alert.alert('Consultation Completed', `Prescription saved & ${fullPatient.patientName || 'patient'} sent to Reception for Fee Collection!`);

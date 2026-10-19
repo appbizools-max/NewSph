@@ -11,10 +11,10 @@ export interface BranchTargetResult {
 }
 
 export const DEFAULT_BRANCH_MONTHLY_GOALS: Record<string, number> = {
-  kphb: 0,
-  nallagandla: 0,
-  dilshuknagar: 0,
-  chandanagar: 0,
+  kphb: 725000,
+  nallagandla: 325000,
+  dilshuknagar: 225000,
+  chandanagar: 550000,
 };
 
 export const normalizeBranchKey = (raw: string = ''): string => {
@@ -256,3 +256,50 @@ export const syncBranchTargetToFirestore = async (
     console.warn(`Error syncing branchTarget for ${branchKey}:`, err);
   }
 };
+
+/**
+ * Atomically increments targetReached by a newly collected payment
+ * without recalculating or resetting from partial queue data.
+ */
+export const incrementBranchTargetRevenue = async (
+  branchName: string,
+  amountPaid: number,
+  dbInstance?: any
+): Promise<void> => {
+  const activeDb = dbInstance || getSafeDb();
+  if (!activeDb || !amountPaid || amountPaid <= 0) return;
+  const branchKey = normalizeBranchKey(branchName);
+  const canonName = getCanonicalBranchName(branchKey);
+
+  try {
+    const docRef = doc(activeDb, 'branchTargets', branchKey);
+    const snap = await getDoc(docRef);
+    let existingMonthlyTarget = DEFAULT_BRANCH_MONTHLY_GOALS[branchKey] || 725000;
+    let existingReached = 0;
+
+    if (snap.exists()) {
+      const data = snap.data();
+      existingMonthlyTarget = Number(data?.monthlyTarget) || existingMonthlyTarget;
+      existingReached = Number(data?.targetReached) || 0;
+    }
+
+    const newReached = existingReached + amountPaid;
+    const remaining = existingMonthlyTarget > 0 ? Math.max(0, existingMonthlyTarget - newReached) : 0;
+    const percentage = existingMonthlyTarget > 0 ? Math.round((newReached / existingMonthlyTarget) * 100) : 0;
+
+    await setDoc(docRef, {
+      id: branchKey,
+      branchId: branchKey,
+      branchName: canonName,
+      monthlyTarget: existingMonthlyTarget,
+      targetReached: newReached,
+      remaining,
+      percentage,
+      month: getCurrentMonthYMD(),
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+  } catch (err) {
+    console.warn('Error incrementing branch target revenue:', err);
+  }
+};
+

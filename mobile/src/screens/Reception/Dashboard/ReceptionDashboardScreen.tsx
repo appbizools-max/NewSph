@@ -1,14 +1,14 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { StyleSheet, Text, View, ScrollView, TouchableOpacity, Modal, Linking, Alert, TextInput, ActivityIndicator } from 'react-native';
 import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { getSafeDb, collection, onSnapshot, doc, updateDoc, deleteDoc, getDocs } from '../../../utils/firebaseSafe';
+import { getSafeDb, collection, onSnapshot, doc, updateDoc, deleteDoc, getDocs, getDoc, setDoc } from '../../../utils/firebaseSafe';
 import { sendCancellationWhatsAppNotification, sanitizeDoctorName, resolveCanonicalBranchId, BRANCHES } from '@app/shared';
 import { PatientAppointmentRecord } from '../../../components/AppointmentsQueueUI';
 import { getBranchShortcut } from '../../../utils/idGenerator';
 import { DEFAULT_DOCTORS_SEED } from '../BookAppointment/BookAppointmentScreen';
 import { TargetProgressUI } from '../../../components/TargetProgressUI';
 import { AppointmentPaymentModal } from '../../../components/AppointmentPaymentModal';
-import { getPatientVisitState } from '../../../utils/patientVisitState';
+import { getPatientVisitState, isAppAppointment } from '../../../utils/patientVisitState';
 import { receptionDataStore } from '../../../utils/receptionDataStore';
 import { calculateRealBranchRevenue, syncBranchTargetToFirestore } from '../../../utils/branchRevenueCalculator';
 
@@ -39,14 +39,18 @@ interface ReceptionDashboardScreenProps {
 }
 
 const DEFAULT_BRANCH_TARGETS: Record<string, { monthlyTarget: number; targetReached: number }> = {
-  kphb: { monthlyTarget: 0, targetReached: 0 },
-  nallagandla: { monthlyTarget: 0, targetReached: 0 },
-  dilshuknagar: { monthlyTarget: 0, targetReached: 0 },
-  chandanagar: { monthlyTarget: 0, targetReached: 0 },
+  kphb: { monthlyTarget: 725000, targetReached: 0 },
+  nallagandla: { monthlyTarget: 325000, targetReached: 0 },
+  dilshuknagar: { monthlyTarget: 225000, targetReached: 0 },
+  chandanagar: { monthlyTarget: 550000, targetReached: 0 },
 };
 
 const getBranchDefaultTarget = (bName: string) => {
-  return { monthlyTarget: 0, targetReached: 0 };
+  const norm = String(bName || '').toLowerCase();
+  if (norm.includes('nalla') || norm.includes('nallagandla')) return DEFAULT_BRANCH_TARGETS.nallagandla;
+  if (norm.includes('dilshuk') || norm.includes('dilsukh') || norm.includes('dsnr') || norm.includes('dshnr')) return DEFAULT_BRANCH_TARGETS.dilshuknagar;
+  if (norm.includes('chanda') || norm.includes('chnr') || norm.includes('chandanagar')) return DEFAULT_BRANCH_TARGETS.chandanagar;
+  return DEFAULT_BRANCH_TARGETS.kphb;
 };
 
 const getTodayDateStr = () => {
@@ -318,6 +322,11 @@ const PatientCardItem: React.FC<PatientCardItemProps> = React.memo(({
                 <Text style={{ fontSize: 9.5, fontWeight: '900', color: vState.badgeColor }}>{vState.badgeText}</Text>
               </View>
             )}
+            {(vState?.isApp || isAppAppointment(patient)) ? (
+              <View style={{ backgroundColor: '#f3e8ff', borderWidth: 1, borderColor: '#d8b4fe', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4 }}>
+                <Text style={{ fontSize: 9.5, fontWeight: '900', color: '#7e22ce' }}>APP</Text>
+              </View>
+            ) : null}
           </View>
           <Text style={styles.patientMeta}>
             {patient.status === 'upcoming' ? (
@@ -507,7 +516,8 @@ const PatientCardItem: React.FC<PatientCardItemProps> = React.memo(({
     p.doctor === n.doctor &&
     p.branch === n.branch &&
     p.queueOrder === n.queueOrder &&
-    p.visitState?.badgeText === n.visitState?.badgeText
+    p.visitState?.badgeText === n.visitState?.badgeText &&
+    p.visitState?.isApp === n.visitState?.isApp
   );
 });
 
@@ -608,10 +618,39 @@ export const ReceptionDashboardScreen: React.FC<ReceptionDashboardScreenProps> =
   useEffect(() => {
     const activeDb = getSafeDb();
     if (!activeDb) return;
+
+    // Ensure base target configuration exists in Firestore branchTargets without overwriting revenue
+    const branchesToSync = [
+      { id: 'kphb', name: 'KPHB Branch', monthlyTarget: 725000 },
+      { id: 'chandanagar', name: 'Chandanagar Branch', monthlyTarget: 550000 },
+      { id: 'nallagandla', name: 'Nallagandla Branch', monthlyTarget: 325000 },
+      { id: 'dilshuknagar', name: 'Dilshuknagar Branch', monthlyTarget: 225000 }
+    ];
+    branchesToSync.forEach(async (b) => {
+      try {
+        const docRef = doc(activeDb, 'branchTargets', b.id);
+        const snap = await getDoc(docRef);
+        if (!snap.exists()) {
+          await setDoc(docRef, {
+            id: b.id,
+            branchId: b.id,
+            branchName: b.name,
+            monthlyTarget: b.monthlyTarget,
+            targetReached: 0,
+            remaining: b.monthlyTarget,
+            percentage: 0,
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+        }
+      } catch (err) {
+        console.warn(`Authoritative branch target sync notice for ${b.id}:`, err);
+      }
+    });
+
     try {
       const colRef = collection(activeDb, 'branchTargets');
       const unsubscribe = onSnapshot(colRef, (snapshot) => {
-        const curBranch = selectedDashboardBranch === 'All Branches' ? 'KPHB Branch' : selectedDashboardBranch;
+        const curBranch = selectedDashboardBranch === 'All Branches' ? (currentBranch || 'KPHB Branch') : selectedDashboardBranch;
         const defTarget = getBranchDefaultTarget(curBranch);
 
         if (!snapshot.empty) {
@@ -643,9 +682,11 @@ export const ReceptionDashboardScreen: React.FC<ReceptionDashboardScreenProps> =
           }
 
           if (targetData) {
+            const effectiveReached = Number(targetData.targetReached) || 0;
+            const effectiveTarget = Number(targetData.monthlyTarget) || defTarget.monthlyTarget;
             setBranchTarget({
-              monthlyTarget: Number(targetData.monthlyTarget) || defTarget.monthlyTarget,
-              targetReached: Number(targetData.targetReached) || defTarget.targetReached,
+              monthlyTarget: effectiveTarget,
+              targetReached: effectiveReached,
               branchName: targetData.branchName || curBranch
             });
           } else {
@@ -674,20 +715,6 @@ export const ReceptionDashboardScreen: React.FC<ReceptionDashboardScreenProps> =
     const curBranch = selectedDashboardBranch === 'All Branches' ? (currentBranch || 'KPHB Branch') : selectedDashboardBranch;
     return calculateRealBranchRevenue(curBranch, liveAppointments, packageMembersList, branchTarget.monthlyTarget);
   }, [selectedDashboardBranch, currentBranch, liveAppointments, packageMembersList, branchTarget.monthlyTarget]);
-
-  useEffect(() => {
-    const hasData = liveAppointments.length > 0;
-    // Only update and sync to Firestore if realBranchResult is GREATER than branchTarget.targetReached
-    // This protects the true monthly branch target from being overwritten by an incomplete local appointments subset
-    if (hasData && realBranchResult.targetReached > (branchTarget.targetReached || 0)) {
-      setBranchTarget(prev => ({
-        ...prev,
-        targetReached: realBranchResult.targetReached,
-        monthlyTarget: realBranchResult.monthlyTarget || prev.monthlyTarget,
-      }));
-      syncBranchTargetToFirestore(realBranchResult.branchName, realBranchResult.targetReached, realBranchResult.monthlyTarget).catch(() => { });
-    }
-  }, [realBranchResult.targetReached, realBranchResult.monthlyTarget, realBranchResult.branchName, branchTarget.targetReached, liveAppointments.length]);
 
   // Subscribe to real-time Firestore doctors collection
   useEffect(() => {
@@ -1168,9 +1195,9 @@ export const ReceptionDashboardScreen: React.FC<ReceptionDashboardScreenProps> =
       {/* Target Progress Card */}
       <View style={{ paddingHorizontal: 10, marginTop: 8 }}>
         <TargetProgressUI
-          branchName={branchTarget.branchName || realBranchResult.branchName}
-          monthlyTarget={branchTarget.monthlyTarget || realBranchResult.monthlyTarget}
-          targetReached={Math.max(branchTarget.targetReached || 0, realBranchResult.targetReached || 0)}
+          branchName={branchTarget.branchName || (selectedDashboardBranch === 'All Branches' ? (currentBranch || 'KPHB Branch') : selectedDashboardBranch)}
+          monthlyTarget={branchTarget.monthlyTarget || 0}
+          targetReached={branchTarget.targetReached || 0}
         />
       </View>
 

@@ -47,7 +47,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
   const [staffPassword, setStaffPassword] = useState('');
   const [showStaffPassword, setShowStaffPassword] = useState(false);
   const [mobileNumber, setMobileNumber] = useState('');
-  const [otpCode, setOtpCode] = useState('1234');
+  const [otpCode, setOtpCode] = useState('');
   const [otpSent, setOtpSent] = useState(false);
   const [displayedOtp, setDisplayedOtp] = useState('');
   const [smsStatusNotice, setSmsStatusNotice] = useState('');
@@ -55,7 +55,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [cachedAuthData, setCachedAuthData] = useState<WebLoginSuccessData | null>(null);
   const [countdown, setCountdown] = useState<number>(30);
-  const [sentOtp, setSentOtp] = useState<string>('1234');
+  const [sentOtp, setSentOtp] = useState<string>('');
   const [otpExpiresAt, setOtpExpiresAt] = useState<number>(0);
 
   useEffect(() => {
@@ -306,20 +306,20 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
     }
 
     const generatedOtp = generate4DigitOtp();
-    const expiry = Date.now() + 30 * 1000;
+    const expiry = Date.now() + 5 * 60 * 1000; // 5 minutes validity
 
     setSentOtp(generatedOtp);
     setOtpExpiresAt(expiry);
     setCachedAuthData(verifiedAuth);
 
-    // 1. INSTANTLY transition to OTP step (0ms delay! No loading circle!)
+    // 1. Transition to OTP step with empty input
     setIsLoading(false);
     setOtpSent(true);
-    setOtpCode('1234');
+    setOtpCode('');
     setCountdown(30);
-    setSmsStatusNotice(`Sending verification code to +91 ${clean10}... (Default OTP: 1234)`);
+    setSmsStatusNotice(`Sending 4-digit verification code to +91 ${clean10}...`);
 
-    // 2. Save OTP to Firestore in background for audit
+    // 2. Save OTP to Firestore in background for audit & verification
     if (db && clean10) {
       setDoc(doc(db, 'auth_otps', clean10), {
         phone: clean10,
@@ -333,45 +333,44 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
       }).catch(err => console.warn('Background auth/OTP notice:', err));
     }
 
-    // 3. Dispatch SMS in background without blocking UI
+    // 3. Dispatch real SMS via SMS gateway
     sendSmsOtp(clean10, generatedOtp).then(smsResult => {
       if (smsResult.success) {
-        setSmsStatusNotice(`A 4-digit verification code has been sent via SMS to +91 ${clean10}. (Default OTP: 1234)`);
+        setSmsStatusNotice(`A 4-digit verification code has been sent via SMS to +91 ${clean10}.`);
       } else {
-        setSmsStatusNotice(`SMS Dispatch: ${smsResult.message}. You can use default OTP 1234.`);
+        setSmsStatusNotice(`SMS Dispatch: ${smsResult.message}`);
       }
-    }).catch(() => {
-      setSmsStatusNotice(`You can use default OTP 1234 to proceed.`);
+    }).catch((err) => {
+      setSmsStatusNotice(`SMS dispatch failed. Please click Resend OTP.`);
     });
   };
 
-  // VERIFY 4-DIGIT SMS OTP (Instant 0ms in-memory verification, zero loading delay!)
+  // VERIFY REAL 4-DIGIT SMS OTP
   const handleOtpSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
 
-    const cleanOtp = otpCode.trim() || '1234';
-    if (!cleanOtp) {
-      setErrorMessage('Please enter the 4-digit OTP received via SMS (or use default 1234).');
+    const cleanOtp = otpCode.trim();
+    if (!cleanOtp || cleanOtp.length !== 4) {
+      setErrorMessage('Please enter the 4-digit OTP received via SMS.');
       return;
     }
 
     const { clean10 } = normalizePhoneForSms(mobileNumber);
 
-    // 1. Check expiration if user typed SMS OTP
-    const isDefault = cleanOtp === '1234';
-    if (!isDefault && otpExpiresAt > 0 && Date.now() > otpExpiresAt) {
-      setErrorMessage('OTP has expired (30 seconds validity). Please click Resend OTP or use default OTP 1234.');
+    // 1. Check expiration (5 minutes)
+    if (otpExpiresAt > 0 && Date.now() > otpExpiresAt) {
+      setErrorMessage('OTP has expired. Please click Resend OTP to receive a fresh code.');
       return;
     }
 
-    // 2. Instant In-Memory Match
-    let isOtpValid = isDefault || (sentOtp && cleanOtp === sentOtp);
+    // 2. In-Memory match against dispatched SMS OTP
+    let isOtpValid = Boolean(sentOtp && cleanOtp === sentOtp);
 
-    // 3. Fast fallback to Firestore OTP check with 1s timeout
+    // 3. Fallback to Firestore OTP check with 1.5s timeout
     if (!isOtpValid && db && clean10) {
       try {
-        const timeoutPromise = new Promise<null>(resolve => setTimeout(() => resolve(null), 1000));
+        const timeoutPromise = new Promise<null>(resolve => setTimeout(() => resolve(null), 1500));
         const otpSnap = await Promise.race([
           getDoc(doc(db, 'auth_otps', clean10)),
           timeoutPromise
@@ -388,7 +387,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
     }
 
     if (!isOtpValid) {
-      setErrorMessage('Invalid OTP code. Please check your SMS or enter default OTP 1234.');
+      setErrorMessage('Invalid OTP code. Please enter the correct 4-digit OTP sent to your phone.');
       return;
     }
 
@@ -494,33 +493,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
             <Phone size={13} color={activeRole === 'otp' ? '#258ec8' : '#64748b'} />
             Doctor / Reception
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              setActiveRole('staff');
-              setErrorMessage('');
-            }}
-            style={{
-              flex: 1,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '5px',
-              padding: '9px 6px',
-              borderRadius: '9px',
-              border: 'none',
-              background: activeRole === 'staff' ? '#ffffff' : 'transparent',
-              color: activeRole === 'staff' ? '#258ec8' : '#64748b',
-              fontWeight: activeRole === 'staff' ? 800 : 600,
-              fontSize: '11.5px',
-              cursor: 'pointer',
-              boxShadow: activeRole === 'staff' ? '0 2px 8px rgba(0,0,0,0.06)' : 'none',
-              transition: 'all 0.15s ease'
-            }}
-          >
-            <User size={13} color={activeRole === 'staff' ? '#258ec8' : '#64748b'} />
-            Staff Login
-          </button>
+
           <button
             type="button"
             onClick={() => {
@@ -637,21 +610,18 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
                 )}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                   <label style={{ fontSize: '12.5px !important', fontWeight: 700, color: '#475569' }}>
-                    Verification OTP
+                    Enter 4-Digit SMS OTP
                   </label>
-                  <span style={{ fontSize: '11px', color: '#0284c7', fontWeight: 700, background: '#e0f2fe', padding: '2px 8px', borderRadius: '6px' }}>
-                    Default OTP: 1234
-                  </span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', background: '#eef5fc', borderRadius: '10px', padding: '0 14px', height: '46px', border: '1px solid #e0ecf8' }}>
                   <Lock size={16} color="#64748b" style={{ marginRight: '12px' }} />
                   <input
                     type="text"
                     value={otpCode}
-                    onChange={e => setOtpCode(e.target.value)}
-                    placeholder="Enter 4-digit OTP (Default: 1234)"
+                    onChange={e => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                    placeholder="Enter 4-digit OTP received via SMS"
                     maxLength={4}
-                    style={{ background: 'transparent', border: 'none', outline: 'none', width: '100%', fontSize: '13px !important', color: '#0f172a', fontWeight: 500 }}
+                    style={{ background: 'transparent', border: 'none', outline: 'none', width: '100%', fontSize: '14px !important', color: '#0f172a', fontWeight: 700, letterSpacing: '4px' }}
                     required
                   />
                 </div>

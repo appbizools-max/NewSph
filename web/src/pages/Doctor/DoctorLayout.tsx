@@ -17,7 +17,16 @@ export const DoctorLayout: React.FC<DoctorLayoutProps> = ({
   doctorName = 'Dr. Prashanth K Vaidya',
   onLogout,
 }) => {
-  const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const getTabFromUrl = () => {
+    const path = window.location.pathname.toLowerCase().replace(/^\//, '');
+    if (path === 'revenue' || path === 'total_revenue' || path === 'total-revenue' || path === 'finance') return 'total_revenue';
+    if (path === 'packages') return 'packages';
+    if (path === 'patient_list' || path === 'patients') return 'patient_list';
+    if (path === 'patient_file') return 'patient_file';
+    return 'dashboard';
+  };
+
+  const [activeTab, setActiveTab] = useState<string>(getTabFromUrl);
   const [selectedPatient, setSelectedPatient] = useState<any | null>(null);
 
   const isHeadDoctor = doctorCategory === 'Head Doctor' || doctorName.includes('Prashanth') || doctorName.includes('Rama') || doctorName.includes('Jobedah');
@@ -27,7 +36,26 @@ export const DoctorLayout: React.FC<DoctorLayoutProps> = ({
       setSelectedPatient(data);
     }
     setActiveTab(tab);
+
+    let targetPath = '/doctor';
+    if (tab === 'total_revenue' || tab === 'revenue') targetPath = '/revenue';
+    else if (tab === 'packages') targetPath = '/packages';
+    else if (tab === 'patient_list') targetPath = '/patients';
+    else if (tab === 'patient_file') targetPath = '/patient_file';
+    else targetPath = '/doctor';
+
+    if (window.location.pathname !== targetPath) {
+      window.history.pushState({}, '', targetPath);
+    }
   };
+
+  React.useEffect(() => {
+    const handlePopState = () => {
+      setActiveTab(getTabFromUrl());
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   const renderContent = () => {
     switch (activeTab) {
@@ -41,6 +69,15 @@ export const DoctorLayout: React.FC<DoctorLayoutProps> = ({
           />
         );
       case 'patient_file':
+        if (!selectedPatient) {
+          return (
+            <DoctorDashboardPage
+              doctorCategory={isHeadDoctor ? 'Head Doctor' : 'Employee Doctor'}
+              doctorName={doctorName}
+              onNavigateTab={handleNavigate}
+            />
+          );
+        }
         return (
           <PatientFilePage
             initialPatient={selectedPatient}
@@ -58,7 +95,7 @@ export const DoctorLayout: React.FC<DoctorLayoutProps> = ({
           />
         );
       case 'packages':
-        return isHeadDoctor ? <DoctorPackagesPage /> : <DoctorDashboardPage doctorCategory="Employee Doctor" doctorName={doctorName} />;
+        return isHeadDoctor ? <DoctorPackagesPage doctorName={doctorName} /> : <DoctorDashboardPage doctorCategory="Employee Doctor" doctorName={doctorName} />;
       case 'total_revenue':
       case 'revenue':
         return isHeadDoctor ? <DoctorTotalRevenuePage /> : <DoctorDashboardPage doctorCategory="Employee Doctor" doctorName={doctorName} />;
@@ -77,7 +114,7 @@ export const DoctorLayout: React.FC<DoctorLayoutProps> = ({
     <div style={{ display: 'flex', minHeight: 'calc(100vh - 60px)', background: '#f8fafc' }}>
       <DoctorSidebar
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={handleNavigate}
         isHeadDoctor={isHeadDoctor}
         onLogout={onLogout}
         doctorName={doctorName}

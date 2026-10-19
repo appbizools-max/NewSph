@@ -44,7 +44,6 @@ export const DURATION_OPTIONS = [
   '5 Months',
   '6 Months'
 ];
-
 export interface MedicineItem {
   name: string;
   timing: string;

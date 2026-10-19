@@ -54,14 +54,15 @@ export async function dispatchPushNotificationToTargetRoles(payload: {
       if (!data || !data.token) return;
 
       const role = String(data.role || '').toLowerCase();
+      const dept = String(data.department || data.dept || '').toLowerCase();
       const branchClean = normalizeBranchTopic(data.branch || data.cleanBranch || '');
 
-      const isHR = role === 'admin' || role === 'hr';
+      const isHR = role === 'admin' || role === 'hr' || role.includes('admin') || role.includes('hr') || dept.includes('hr') || dept.includes('admin');
       const isTargetReception = (role === 'reception' || role.includes('reception')) && (!targetBranchClean || branchClean === targetBranchClean);
 
       let shouldSend = false;
       if (payload.targetRoles.includes('hr') && isHR) shouldSend = true;
-      if (payload.targetRoles.includes('admin') && role === 'admin') shouldSend = true;
+      if (payload.targetRoles.includes('admin') && (role === 'admin' || role.includes('admin') || dept.includes('admin'))) shouldSend = true;
       if (payload.targetRoles.includes('reception') && isTargetReception) shouldSend = true;
 
       // Regular staff NEVER receives booking or payment notifications
@@ -236,6 +237,12 @@ export async function createStaffLoginNotificationInFirestore(payload: {
       status: 'active',
     };
     await addDoc(collection(db, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      data: notiDoc,
+    }).catch(() => {});
     cleanupOldNotifications().catch(() => {});
   } catch (e) {
     console.warn('[FCM-Web] Error saving staff login notification:', e);
@@ -271,6 +278,12 @@ export async function createStaffLogoutNotificationInFirestore(payload: {
       status: 'completed',
     };
     await addDoc(collection(db, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      data: notiDoc,
+    }).catch(() => {});
     cleanupOldNotifications().catch(() => {});
   } catch (e) {
     console.warn('[FCM-Web] Error saving staff logout notification:', e);
@@ -309,6 +322,12 @@ export async function createStaffPunchInNotificationInFirestore(payload: {
       status: 'active',
     };
     await addDoc(collection(db, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      data: notiDoc,
+    }).catch(() => {});
     cleanupOldNotifications().catch(() => {});
   } catch (e) {
     console.warn('[FCM-Web] Error saving staff punch in notification:', e);
@@ -350,6 +369,12 @@ export async function createStaffPunchOutNotificationInFirestore(payload: {
       status: 'completed',
     };
     await addDoc(collection(db, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      data: notiDoc,
+    }).catch(() => {});
     cleanupOldNotifications().catch(() => {});
   } catch (e) {
     console.warn('[FCM-Web] Error saving staff punch out notification:', e);
@@ -403,9 +428,67 @@ export async function createStaffDailyReportNotificationInFirestore(payload: {
       status: 'submitted',
     };
     await addDoc(collection(db, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      data: notiDoc,
+    }).catch(() => {});
     cleanupOldNotifications().catch(() => {});
   } catch (e) {
     console.warn('[FCM-Web] Error saving staff report notification:', e);
+  }
+}
+
+/**
+ * Notifies HR and Admin when a staff member submits a leave application
+ */
+export async function createStaffLeaveRequestNotificationInFirestore(payload: {
+  staffName: string;
+  branch: string;
+  staffId?: string;
+  leaveType: string;
+  fromDate: string;
+  toDate: string;
+  daysCount?: number | string;
+  reason?: string;
+}): Promise<void> {
+  if (!db) return;
+  try {
+    const cleanBranch = normalizeBranchTopic(payload.branch);
+    const staffDisplay = payload.staffName || 'Staff Member';
+    const branchDisplay = payload.branch || 'Clinic Branch';
+    const days = payload.daysCount || 1;
+    const leaveType = payload.leaveType || 'Leave';
+    const dates = payload.fromDate === payload.toDate ? payload.fromDate : `${payload.fromDate} to ${payload.toDate}`;
+
+    const notiDoc = {
+      type: 'staff_leave_request',
+      title: '📝 Staff Leave Application',
+      body: `${staffDisplay} (${branchDisplay}) applied for ${days} day(s) ${leaveType} (${dates})${payload.reason ? `: "${payload.reason}"` : ''}`,
+      staffName: staffDisplay,
+      staffId: payload.staffId || '',
+      branch: branchDisplay,
+      targetBranch: cleanBranch,
+      leaveType,
+      fromDate: payload.fromDate,
+      toDate: payload.toDate,
+      daysCount: days,
+      reason: payload.reason || '',
+      targetRoles: ['hr', 'admin'],
+      createdAt: new Date().toISOString(),
+      status: 'pending',
+    };
+    await addDoc(collection(db, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      data: notiDoc,
+    }).catch(() => {});
+    cleanupOldNotifications().catch(() => {});
+  } catch (e) {
+    console.warn('[FCM-Web] Error saving staff leave request notification:', e);
   }
 }
 
@@ -447,6 +530,12 @@ export async function createFeeDiscountRequestNotificationInFirestore(payload: {
       status: 'pending',
     };
     await addDoc(collection(db, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      data: notiDoc,
+    }).catch(() => {});
     cleanupOldNotifications().catch(() => {});
   } catch (e) {
     console.warn('[FCM-Web] Error saving discount request notification:', e);
@@ -492,6 +581,13 @@ export async function createFeeDiscountResponseNotificationInFirestore(payload: 
       createdAt: new Date().toISOString(),
     };
     await addDoc(collection(db, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['reception', 'hr', 'admin'],
+      targetBranch: cleanBranch,
+      data: notiDoc,
+    }).catch(() => {});
     cleanupOldNotifications().catch(() => {});
   } catch (e) {
     console.warn('[FCM-Web] Error saving discount response notification:', e);
@@ -527,6 +623,13 @@ export async function createCleaningUploadedNotificationInFirestore(payload: {
       status: 'pending',
     };
     await addDoc(collection(db, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin', 'reception'],
+      targetBranch: cleanBranch,
+      data: notiDoc,
+    }).catch(() => {});
     cleanupOldNotifications().catch(() => {});
   } catch (e) {
     console.warn('[FCM-Web] Error saving cleaning uploaded notification:', e);
@@ -570,6 +673,13 @@ export async function createCleaningApprovalNotificationInFirestore(payload: {
       createdAt: new Date().toISOString(),
     };
     await addDoc(collection(db, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['reception', 'hr', 'admin'],
+      targetBranch: cleanBranch,
+      data: notiDoc,
+    }).catch(() => {});
     cleanupOldNotifications().catch(() => {});
   } catch (e) {
     console.warn('[FCM-Web] Error saving cleaning approval notification:', e);

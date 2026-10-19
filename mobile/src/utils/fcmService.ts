@@ -211,12 +211,32 @@ export async function requestAppPermissions(): Promise<{ notifications: boolean;
   return { notifications: notiGranted, location: locGranted };
 }
 
+// In-memory cache to deduplicate local notifications triggered within 6 seconds
+const _recentLocalNotifications = new Map<string, number>();
+
 /**
  * Triggers a real Android system push notification in the status bar & heads-up banner
  * Also vibrates the physical device for tactile feedback on all Android models
+ * Deduplicated to avoid 2x notifications
  */
 export async function triggerSystemPushNotification(title: string, body: string, data?: Record<string, any>): Promise<void> {
   try {
+    const notiKey = `${data?.id || ''}_${data?.type || ''}_${title}_${body}`;
+    const now = Date.now();
+    const lastTriggered = _recentLocalNotifications.get(notiKey) || 0;
+    if (now - lastTriggered < 6000) {
+      // Deduplicate: already triggered within the last 6 seconds!
+      return;
+    }
+    _recentLocalNotifications.set(notiKey, now);
+
+    // Prune cache if it grows large
+    if (_recentLocalNotifications.size > 100) {
+      for (const [k, t] of _recentLocalNotifications.entries()) {
+        if (now - t > 60000) _recentLocalNotifications.delete(k);
+      }
+    }
+
     const Notifications = getNotifications();
     if (!Notifications || typeof Notifications.scheduleNotificationAsync !== 'function') return;
 
@@ -298,10 +318,11 @@ export async function dispatchPushNotificationToTargetRoles(payload: {
       const data = d.data();
       if (!data || !data.token) return;
 
-      const role = String(data.role || '').toLowerCase();
+      const role = String(data.role || '').toLowerCase().trim();
+      const dept = String(data.department || '').toLowerCase().trim();
       const branchClean = normalizeBranchTopic(data.branch || data.cleanBranch || '');
 
-      const isHR = role === 'admin' || role === 'hr';
+      const isHR = role === 'admin' || role === 'hr' || role.includes('admin') || role.includes('hr') || dept.includes('hr') || dept.includes('admin');
       const isTargetReception = (role === 'reception' || role.includes('reception')) && (!targetBranchClean || branchClean === targetBranchClean);
 
       let shouldSend = false;
@@ -476,6 +497,12 @@ export async function createStaffLoginNotificationInFirestore(payload: {
       status: 'active',
     };
     await addDoc(collection(activeDb, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      data: notiDoc,
+    }).catch(() => { });
     cleanupOldNotifications().catch(() => { });
   } catch (e) {
     console.warn('[FCM] Error saving staff login notification:', e);
@@ -512,6 +539,12 @@ export async function createStaffLogoutNotificationInFirestore(payload: {
       status: 'completed',
     };
     await addDoc(collection(activeDb, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      data: notiDoc,
+    }).catch(() => { });
     cleanupOldNotifications().catch(() => { });
   } catch (e) {
     console.warn('[FCM] Error saving staff logout notification:', e);
@@ -551,6 +584,12 @@ export async function createStaffPunchInNotificationInFirestore(payload: {
       status: 'active',
     };
     await addDoc(collection(activeDb, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      data: notiDoc,
+    }).catch(() => { });
     cleanupOldNotifications().catch(() => { });
   } catch (e) {
     console.warn('[FCM] Error saving staff punch in notification:', e);
@@ -593,6 +632,12 @@ export async function createStaffPunchOutNotificationInFirestore(payload: {
       status: 'completed',
     };
     await addDoc(collection(activeDb, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      data: notiDoc,
+    }).catch(() => { });
     cleanupOldNotifications().catch(() => { });
   } catch (e) {
     console.warn('[FCM] Error saving staff punch out notification:', e);
@@ -644,9 +689,69 @@ export async function createStaffDailyReportNotificationInFirestore(payload: {
       status: 'submitted',
     };
     await addDoc(collection(activeDb, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      data: notiDoc,
+    }).catch(() => { });
     cleanupOldNotifications().catch(() => { });
   } catch (e) {
     console.warn('[FCM] Error saving staff report notification:', e);
+  }
+}
+
+/**
+ * Notifies HR and Admin when a Staff member applies for Leave
+ */
+export async function createStaffLeaveRequestNotificationInFirestore(payload: {
+  staffName: string;
+  staffId?: string;
+  branch: string;
+  leaveType: string;
+  fromDate: string;
+  toDate: string;
+  daysCount?: number | string;
+  reason: string;
+}): Promise<void> {
+  try {
+    const activeDb = getSafeDb();
+    if (!activeDb) return;
+    const cleanBranch = normalizeBranchTopic(payload.branch);
+    const staffDisplay = payload.staffName || 'Staff Member';
+    const branchDisplay = payload.branch || 'Clinic Branch';
+    const days = payload.daysCount || 1;
+
+    const title = '📝 New Staff Leave Application';
+    const body = `${staffDisplay} (${branchDisplay}) applied for ${days} day(s) ${payload.leaveType} Leave (${payload.fromDate} to ${payload.toDate}). Reason: "${payload.reason}"`;
+
+    const notiDoc = {
+      type: 'staff_leave_request',
+      title,
+      body,
+      staffName: staffDisplay,
+      staffId: payload.staffId || '',
+      branch: branchDisplay,
+      targetBranch: cleanBranch,
+      leaveType: payload.leaveType,
+      fromDate: payload.fromDate,
+      toDate: payload.toDate,
+      daysCount: days,
+      reason: payload.reason,
+      targetRoles: ['hr', 'admin'],
+      createdAt: new Date().toISOString(),
+      status: 'pending',
+    };
+    await addDoc(collection(activeDb, 'notifications'), notiDoc);
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      data: notiDoc,
+    }).catch(() => { });
+    cleanupOldNotifications().catch(() => { });
+  } catch (e) {
+    console.warn('[FCM] Error saving staff leave notification:', e);
   }
 }
 
@@ -692,9 +797,12 @@ export async function createFeeDiscountRequestNotificationInFirestore(payload: {
       status: 'pending',
     };
     await addDoc(collection(activeDb, 'notifications'), notiDoc);
-
-    // Trigger local push notification + vibration on mobile device
-    triggerSystemPushNotification(title, body, notiDoc).catch(() => { });
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      data: notiDoc,
+    }).catch(() => { });
     cleanupOldNotifications().catch(() => { });
   } catch (e) {
     console.warn('[FCM] Error saving discount request notification:', e);
@@ -738,15 +846,19 @@ export async function createFeeDiscountResponseNotificationInFirestore(payload: 
       rejectReason: payload.rejectReason || '',
       reviewedBy: payload.reviewedBy || 'HR',
       status: payload.status.toLowerCase(),
-      targetRoles: ['reception', 'admin'],
+      targetRoles: ['reception', 'admin', 'hr'],
       targetTopic: `topic_branch_${cleanBranch}`,
       appointmentId: payload.appointmentId || '',
       createdAt: new Date().toISOString(),
     };
     await addDoc(collection(activeDb, 'notifications'), notiDoc);
-
-    // Trigger local push notification + vibration on mobile device
-    triggerSystemPushNotification(title, body, notiDoc).catch(() => { });
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['reception', 'admin', 'hr'],
+      targetBranch: cleanBranch,
+      data: notiDoc,
+    }).catch(() => { });
     cleanupOldNotifications().catch(() => { });
   } catch (e) {
     console.warn('[FCM] Error saving discount response notification:', e);
@@ -783,7 +895,13 @@ export async function createCleaningUploadedNotificationInFirestore(payload: {
       status: 'pending',
     };
     await addDoc(collection(activeDb, 'notifications'), notiDoc);
-    triggerSystemPushNotification(title, body, notiDoc).catch(() => { });
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['hr', 'admin'],
+      targetBranch: cleanBranch,
+      data: notiDoc,
+    }).catch(() => { });
     cleanupOldNotifications().catch(() => { });
   } catch (e) {
     console.warn('[FCM] Error saving cleaning uploaded notification:', e);
@@ -828,7 +946,13 @@ export async function createCleaningApprovalNotificationInFirestore(payload: {
       createdAt: new Date().toISOString(),
     };
     await addDoc(collection(activeDb, 'notifications'), notiDoc);
-    triggerSystemPushNotification(title, body, notiDoc).catch(() => { });
+    dispatchPushNotificationToTargetRoles({
+      title: notiDoc.title,
+      body: notiDoc.body,
+      targetRoles: ['reception', 'hr', 'admin'],
+      targetBranch: cleanBranch,
+      data: notiDoc,
+    }).catch(() => { });
     cleanupOldNotifications().catch(() => { });
   } catch (e) {
     console.warn('[FCM] Error saving cleaning approval notification:', e);
@@ -850,7 +974,20 @@ export async function registerFCMForStaff(role: string, branch: string, staffNam
     let expoPushToken: string | null = null;
     let devicePushToken: string | null = null;
 
-    if (typeof Notifications.getExpoPushTokenAsync === 'function') {
+    // 1. Try native FCM Device Token first (direct FCM - does not require Expo cloud server)
+    if (typeof Notifications.getDevicePushTokenAsync === 'function') {
+      try {
+        const devToken = await Notifications.getDevicePushTokenAsync();
+        if (devToken && devToken.data) {
+          devicePushToken = String(devToken.data);
+        }
+      } catch (e1) {
+        // Fallback
+      }
+    }
+
+    // 2. Fallback to Expo Push Token if device token is not available
+    if (!devicePushToken && typeof Notifications.getExpoPushTokenAsync === 'function') {
       try {
         const expoRes = await Notifications.getExpoPushTokenAsync({
           projectId: '942c4865-7e77-443e-b3bd-50521ca257df',
@@ -859,24 +996,7 @@ export async function registerFCMForStaff(role: string, branch: string, staffNam
           expoPushToken = String(expoRes.data);
         }
       } catch (e2) {
-        try {
-          const fallbackRes = await Notifications.getExpoPushTokenAsync();
-          if (fallbackRes && fallbackRes.data) {
-            expoPushToken = String(fallbackRes.data);
-          }
-        } catch (_) { }
-        console.warn('[FCM] getExpoPushTokenAsync notice:', e2);
-      }
-    }
-
-    if (typeof Notifications.getDevicePushTokenAsync === 'function') {
-      try {
-        const devToken = await Notifications.getDevicePushTokenAsync();
-        if (devToken && devToken.data) {
-          devicePushToken = String(devToken.data);
-        }
-      } catch (e1) {
-        console.warn('[FCM] getDevicePushTokenAsync notice:', e1);
+        // Silently handled: device might be offline or running in emulator without EAS credentials
       }
     }
 

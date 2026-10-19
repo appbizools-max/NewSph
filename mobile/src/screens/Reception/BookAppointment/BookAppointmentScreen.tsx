@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef, memo } from '
 import { StyleSheet, Text, View, ScrollView, TextInput, TouchableOpacity, Modal, Alert, BackHandler, Keyboard, InteractionManager, ActivityIndicator } from 'react-native';
 import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { createDocument, sendBookingWhatsAppNotification, sanitizeDoctorName } from '@app/shared';
+import { createDocument, sendBookingWhatsAppNotification, sendBookingSMS, sanitizeDoctorName } from '@app/shared';
 import {
   getSafeDb, collection, onSnapshot, addDoc, setDoc, deleteDoc, doc, query, where, limit, getDocs
 } from '../../../utils/firebaseSafe';
@@ -1967,6 +1967,17 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
         branch: effectiveBranch
       }).catch(err => console.error('WhatsApp booking notification error:', err));
 
+      // Trigger SMS Booking Confirmation (DLT Template)
+      sendBookingSMS(
+        phoneNumber,
+        patientName,
+        selectedDoctor,
+        appointmentDate,
+        selectedTimeSlot || '10:00 AM',
+        effectiveBranch,
+        false
+      ).catch(err => console.warn('SMS booking notification notice:', err));
+
       // Trigger FCM Push Notification and 10-day Firestore retention cleanup
       createBookingNotificationInFirestore({
         patientName,
@@ -2853,6 +2864,11 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
                                 {vState.badgeText}
                               </Text>
                             </View>
+                            {vState.isApp ? (
+                              <View style={{ backgroundColor: '#f3e8ff', borderWidth: 1, borderColor: '#d8b4fe', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4 }}>
+                                <Text style={{ fontSize: 9.5, fontWeight: '900', color: '#7e22ce' }}>APP</Text>
+                              </View>
+                            ) : null}
                             {!!prof.branchName && (
                               <View style={{ backgroundColor: '#e0f2fe', borderWidth: 1, borderColor: '#bae6fd', paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4 }}>
                                 <Text style={{ fontSize: 9.5, fontWeight: '700', color: '#0369a1' }}>

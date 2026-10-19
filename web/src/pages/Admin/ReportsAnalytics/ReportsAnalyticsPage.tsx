@@ -448,7 +448,7 @@ export const ReportsAnalyticsPage: React.FC = () => {
     for (const p of allPatientDocs) {
       if (!p) continue;
       if (p.id && seenTxnIds.has(p.id)) continue;
-      const rawDate = p.paymentCollectedAt || p.createdAt || p.date;
+      const rawDate = p.paymentCollectedAt || p.paidAt || p.paymentDate || p.createdAt || p.updatedAt || p.date || p.appointmentDate;
       const phone = String(p.phone || p.phoneNumber || p.mobile || '').replace(/\D/g, '').slice(-10);
       const ymd = normalizeToYMD(rawDate);
       if (phone && ymd && seenPatientPhoneDates.has(`${phone}_${ymd}`)) continue;
@@ -485,12 +485,12 @@ export const ReportsAnalyticsPage: React.FC = () => {
     for (const apt of appointmentDocs) {
       if (!apt) continue;
       if (apt.id && (seenTxnIds.has(apt.id) || seenApptIds.has(apt.id))) continue;
-      const rawDate = apt.appointmentDate || apt.date || apt.createdAt;
+      const rawDate = apt.paymentCollectedAt || apt.paidAt || apt.paymentDate || apt.appointmentDate || apt.date || apt.updatedAt || apt.createdAt;
       const phone = String(apt.phone || apt.phoneNumber || apt.mobile || '').replace(/\D/g, '').slice(-10);
       const ymd = normalizeToYMD(rawDate);
       if (phone && ymd && seenPatientPhoneDates.has(`${phone}_${ymd}`)) continue;
 
-      const cFee = extractNum(apt.amountPaid) || extractNum(apt.consultationFee) || extractNum(apt.amount);
+      const cFee = extractNum(apt.totalPaid) || extractNum(apt.amountPaid) || extractNum(apt.consultationFee) || extractNum(apt.amount);
       if (cFee > 0) {
         const regIdKey = (extractCleanRegId(apt) || '').toLowerCase().trim();
         const patientName = String(apt.patientName || apt.name || '').toLowerCase().trim();

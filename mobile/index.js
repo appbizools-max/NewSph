@@ -1,7 +1,33 @@
 console.log('[SPH_ENTRY] index.js starting...');
 import { registerRootComponent } from 'expo';
 import React, { useState, useEffect } from 'react';
-import { Text, View, ScrollView, SafeAreaView, TouchableOpacity, StyleSheet, Platform } from 'react-native';
+import { Text, View, ScrollView, SafeAreaView, TouchableOpacity, StyleSheet, Platform, LogBox } from 'react-native';
+
+// Suppress harmless background network/reconnection warnings from Metro terminal & device screen
+LogBox.ignoreLogs([
+  '@firebase/firestore',
+  'WebChannelConnection',
+  'transport errored',
+  'expo-notifications',
+  'Error thrown while updating the device push token',
+  'Network request failed',
+  'Setting a timer',
+  'AsyncStorage has been extracted',
+]);
+
+const _origWarn = console.warn;
+console.warn = function (...args) {
+  const msg = typeof args[0] === 'string' ? args[0] : (args[0]?.message || JSON.stringify(args[0]) || '');
+  if (
+    msg.includes('WebChannelConnection') ||
+    msg.includes('transport errored') ||
+    msg.includes('expo-notifications') ||
+    msg.includes('device push token')
+  ) {
+    return; // Silently swallow benign background network warnings
+  }
+  _origWarn.apply(console, args);
+};
 
 // Polyfill global.Blob in React Native to support ArrayBuffer & Uint8Array without throwing
 if (typeof global !== 'undefined' && global.Blob) {

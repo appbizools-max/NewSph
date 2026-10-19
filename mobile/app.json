@@ -2,7 +2,7 @@
   "expo": {
     "name": "Spiritual Homeo Staff",
     "slug": "spiritual-homeo-staff",
-    "version": "1.0.4",
+    "version": "1.0.6",
     "orientation": "portrait",
     "icon": "./assets/app_icon.png",
     "userInterfaceStyle": "dark",
@@ -19,7 +19,7 @@
       }
     },
     "android": {
-      "versionCode": 14,
+      "versionCode": 16,
       "adaptiveIcon": {
         "foregroundImage": "./assets/app_icon.png",
         "backgroundColor": "#0f172a"

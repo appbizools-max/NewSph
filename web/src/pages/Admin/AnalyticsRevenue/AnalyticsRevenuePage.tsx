@@ -14,11 +14,15 @@ import {
   ExternalLink,
   Users,
   CheckCircle2,
-  BarChart3
+  BarChart3,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown
 } from 'lucide-react';
-import { collection, onSnapshot, query, limit } from 'firebase/firestore';
+import { collection, onSnapshot, getDocs, query, limit } from 'firebase/firestore';
 import { db } from '@app/shared';
 import { ReportsAnalyticsPage } from '../ReportsAnalytics/ReportsAnalyticsPage';
+import { receptionDataStore } from '../../../utils/receptionDataStore';
 
 // --- Type Definitions ---
 export interface TransactionRecord {
@@ -41,118 +45,17 @@ export interface TransactionRecord {
   status: string;       // 'PAID' | 'Pending' | 'Completed'
 }
 
-// --- Initial / Fallback Seed Transactions (Including Tayeba & Live Seeds) ---
-const SEED_TRANSACTIONS: TransactionRecord[] = [
-  {
-    id: 'TXN-901',
-    patientId: '863rk/dsnr',
-    patientName: 'Tayeba',
-    phone: '9346423798',
-    branchName: 'Dilshuknagar Branch',
-    doctorName: 'Dr. Ramakrishna Chanduri',
-    revenueSplit: 'Consultation & Medicine Fee',
-    source: 'Old Patient',
-    consultationFee: 500,
-    medicineFee: 700,
-    packageFee: 0,
-    totalAmount: 1200,
-    paymentMethod: 'cash',
-    timestamp: '2026-09-09',
-    dateTime: '09/09/2026, 12:48:04',
-    status: 'PAID'
-  },
-  {
-    id: 'TXN-902',
-    patientId: 'SPH-KPH-0012',
-    patientName: 'Rajesh Kumar',
-    phone: '+91 98490 12345',
-    branchName: 'KPHB Branch',
-    doctorName: 'Dr. Prashanth K Vaidya',
-    revenueSplit: 'Consultation & Medicine Fee',
-    source: 'Instagram',
-    consultationFee: 800,
-    medicineFee: 1200,
-    packageFee: 0,
-    totalAmount: 2000,
-    paymentMethod: 'upi',
-    timestamp: '2026-09-10',
-    dateTime: '10/09/2026, 10:30:00',
-    status: 'PAID'
-  },
-  {
-    id: 'TXN-903',
-    patientId: 'SPH-NLG-0045',
-    patientName: 'Sneha Reddy',
-    phone: '+91 91210 67890',
-    branchName: 'Nallagandla Branch',
-    doctorName: 'Dr. Ramakrishna Chanduri',
-    revenueSplit: 'Package',
-    source: 'Walk-in',
-    consultationFee: 0,
-    medicineFee: 0,
-    packageFee: 5000,
-    totalAmount: 5000,
-    paymentMethod: 'split',
-    splitDetails: { cash: 2000, upi: 3000 },
-    timestamp: '2026-09-10',
-    dateTime: '10/09/2026, 11:15:20',
-    status: 'PAID'
-  },
-  {
-    id: 'TXN-904',
-    patientId: 'SPH-DSN-0181',
-    patientName: 'Venkatesh Rao',
-    phone: '+91 94400 45678',
-    branchName: 'Dilshuknagar Branch',
-    doctorName: 'Dr. Jobedah Parveej',
-    revenueSplit: 'Consultation',
-    source: 'Facebook',
-    consultationFee: 600,
-    medicineFee: 0,
-    packageFee: 0,
-    totalAmount: 600,
-    paymentMethod: 'cash',
-    timestamp: '2026-09-09',
-    dateTime: '09/09/2026, 03:20:10',
-    status: 'PAID'
-  },
-  {
-    id: 'TXN-905',
-    patientId: 'SPH-CHN-0089',
-    patientName: 'Ananya Sharma',
-    phone: '+91 99887 11223',
-    branchName: 'Chandanagar Branch',
-    doctorName: 'Dr. Padma Priya',
-    revenueSplit: 'Package',
-    source: 'Referral',
-    consultationFee: 0,
-    medicineFee: 0,
-    packageFee: 9000,
-    totalAmount: 9000,
-    paymentMethod: 'card',
-    timestamp: '2026-09-09',
-    dateTime: '09/09/2026, 04:45:00',
-    status: 'PAID'
-  },
-  {
-    id: 'TXN-906',
-    patientId: 'SPH-KPH-0099',
-    patientName: 'Kiran Verma',
-    phone: '+91 98765 00011',
-    branchName: 'KPHB Branch',
-    doctorName: 'Dr. Prashanth K Vaidya',
-    revenueSplit: 'Diet Plan',
-    source: 'Google',
-    consultationFee: 0,
-    medicineFee: 0,
-    packageFee: 2600,
-    totalAmount: 2600,
-    paymentMethod: 'upi',
-    timestamp: '2026-09-08',
-    dateTime: '08/09/2026, 01:10:00',
-    status: 'PAID'
-  }
-];
+const getSeedYmd = (offsetDays: number = 0): string => {
+  const d = new Date();
+  d.setDate(d.getDate() - offsetDays);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+// --- Initial Fallback Seed Transactions (Empty by default to prevent showing dummy data) ---
+const SEED_TRANSACTIONS: TransactionRecord[] = [];
 
 const normalizeToYMD = (raw: any): string => {
   if (!raw) return '';
@@ -359,6 +262,28 @@ const extractCleanRegId = (item: any): string => {
   return '';
 };
 
+const isGenericFallback = (reg?: string | null): boolean => {
+  if (!reg) return true;
+  const lower = String(reg).toLowerCase().trim();
+  return (
+    lower.startsWith('863rk') ||
+    (lower.startsWith('sph-') && lower.endsWith('-001')) ||
+    lower === 'undefined' ||
+    lower === 'null' ||
+    lower === ''
+  );
+};
+
+const isClinicOrDummyPhone = (phone?: string | null): boolean => {
+  if (!phone) return true;
+  const clean = String(phone).replace(/\D/g, '').slice(-10);
+  if (clean.length < 10) return true;
+  if (/^(\d)\1{9}$/.test(clean)) return true; // 0000000000, 9999999999
+  if (clean === '1234567890') return true;
+  if (clean.includes('9346423798')) return true; // Clinic reception phone
+  return false;
+};
+
 const formatDisplayRegId = (patientId: string, phone: string = '', branchName: string = ''): string => {
   if (patientId && !isFirestoreAutoId(patientId) && patientId !== 'undefined' && patientId !== 'null') {
     return patientId;
@@ -393,30 +318,59 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
     return String(parseInt(todayStr.split('-')[1] || String(new Date().getMonth() + 1), 10));
   }, [todayStr]);
 
-  // --- 10 Advanced Filter States (Defaults strictly to THIS MONTH upon open) ---
+  // --- 10 Advanced Filter States (Defaults to ALL TIME so all revenue records load immediately) ---
   const [revenueSearch, setRevenueSearch] = useState('');
   const [revenueBranchId, setRevenueBranchId] = useState('all');
   const [revenueDate, setRevenueDate] = useState('');
-  const [revenueYear, setRevenueYear] = useState<string>(currentYearStr);
-  const [revenueMonth, setRevenueMonth] = useState<string>(currentMonthNumStr);
+  const [revenueYear, setRevenueYear] = useState<string>('all');
+  const [revenueMonth, setRevenueMonth] = useState<string>('all');
   const [revenueDoctor, setRevenueDoctor] = useState('all');
   const [revenueSource, setRevenueSource] = useState('all');
   const [revenueMethod, setRevenueMethod] = useState('all');
   const [revenueSplitType, setRevenueSplitType] = useState('all');
   const [revenueAmountRange, setRevenueAmountRange] = useState('all');
 
-  // Quick Preset Date Mode defaults to 'this_month'
-  const [dateMode, setDateMode] = useState<'today' | 'this_month' | 'all'>('this_month');
+  // Quick Preset Date Mode defaults to 'all'
+  const [dateMode, setDateMode] = useState<'today' | 'this_month' | 'all'>('all');
 
   // Pagination States
   const [rowsPerPage, setRowsPerPage] = useState<number>(25);
   const [currentPage, setCurrentPage] = useState<number>(1);
 
+  // Interactive Sorting States in React (Default: Date Newest First)
+  const [sortField, setSortField] = useState<'date' | 'amount' | 'name' | 'branch'>('date');
+  const [sortDirection, setSortDirection] = useState<'desc' | 'asc'>('desc');
+
+  const handleToggleSort = (field: 'date' | 'amount' | 'name' | 'branch') => {
+    if (sortField === field) {
+      setSortDirection(prev => (prev === 'desc' ? 'asc' : 'desc'));
+    } else {
+      setSortField(field);
+      setSortDirection(field === 'date' || field === 'amount' ? 'desc' : 'asc');
+    }
+    setCurrentPage(1);
+  };
+
   // View Mode: 'ledger' (Transactions table) vs 'reports' (Visual reports & graphs)
   const [pageViewMode, setPageViewMode] = useState<'ledger' | 'reports'>('ledger');
 
-  // Real-time Firestore Transactions State
-  const [firestoreTransactions, setFirestoreTransactions] = useState<TransactionRecord[]>([]);
+  // High-performance Instant Cache Initialization (0ms first render)
+  const [firestoreTransactions, setFirestoreTransactions] = useState<TransactionRecord[]>(() => {
+    try {
+      const cached =
+        localStorage.getItem('sph_revenue_cached_records_v5') ||
+        localStorage.getItem('sph_revenue_cached_records_v4') ||
+        localStorage.getItem('sph_revenue_cached_records_v3') ||
+        localStorage.getItem('sph_revenue_cached_records_v2');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (_) { }
+    return [];
+  });
+
+  const [isSyncingLive, setIsSyncingLive] = useState<boolean>(true);
 
   // Sync Live Data from the 4 Specified Revenue Collections:
   // 1. alltransactions (Primary Revenue Source)
@@ -430,11 +384,8 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
       'alltransactions',
       'allpatients',
       'appointments',
-      'nutrition_plans',
-      'patients',
       'package_members'
     ];
-
     const unsubs: Array<() => void> = [];
     const colDocs: Record<string, any[]> = {};
 
@@ -445,9 +396,7 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
       const appointmentDocs = colDocs['appointments'] || [];
       const nutritionDocs = colDocs['nutrition_plans'] || [];
       const packageMemberDocs = colDocs['package_members'] || [];
-
       const records: TransactionRecord[] = [];
-
       // Build live Patient Reg ID & Source lookup maps
       const patientRegIdMap = new Map<string, string>();
       const patientSourceMap = new Map<string, string>();
@@ -494,7 +443,7 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
       // =========================================================================
       for (const item of allTxnDocs) {
         if (!item) continue;
-        const rawDate = item.timestamp || item.date || item.createdAt;
+        const rawDate = item.paymentCollectedAt || item.timestamp || item.date || item.createdAt;
         const ymd = normalizeToYMD(rawDate) || todayStr;
         const phone = String(item.phoneNumber || item.phone || item.mobile || '').replace(/\D/g, '').slice(-10);
 
@@ -522,10 +471,8 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
         // Index in deduplication sets
         if (item.id) seenTxnIds.add(String(item.id));
         if (item.appointmentId) seenAppointmentIds.add(String(item.appointmentId));
-        if (item.patientDocId) seenPatientIds.add(String(item.patientDocId));
-        if (regIdKey) seenPatientIds.add(regIdKey);
-        if (phone && ymd) seenPhoneDates.add(`${phone}_${ymd}`);
-        if (regIdKey && ymd) seenRegDates.add(`${regIdKey}_${ymd}`);
+        if (phone && !isClinicOrDummyPhone(phone) && ymd) seenPhoneDates.add(`${phone}_${ymd}`);
+        if (regIdKey && !isGenericFallback(regIdKey) && ymd) seenRegDates.add(`${regIdKey}_${ymd}`);
 
         // Extract itemsPaid splits: { consultation: 800, medicine: 1200 }
         const itemsConsultation = extractCleanNum(item.itemsPaid?.consultation);
@@ -642,7 +589,7 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
       // =========================================================================
       for (const p of allPatientDocs) {
         if (!p) continue;
-        const rawDate = p.paymentCollectedAt || p.createdAt || p.date;
+        const rawDate = p.paymentCollectedAt || p.paidAt || p.paymentDate || p.createdAt || p.updatedAt || p.date || p.appointmentDate;
         const ymd = normalizeToYMD(rawDate) || todayStr;
         const phone = String(p.phoneNumber || p.phone || p.mobile || '').replace(/\D/g, '').slice(-10);
 
@@ -662,11 +609,12 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
         const regIdKey = resolvedRegId.toLowerCase().trim();
 
         // Check if already accounted for in alltransactions
+        const hasPhoneCollision = phone && !isClinicOrDummyPhone(phone) && ymd && seenPhoneDates.has(`${phone}_${ymd}`);
         const inTransactions =
-          (p.id && (seenTxnIds.has(p.id) || seenPatientIds.has(p.id))) ||
-          (regIdKey && seenPatientIds.has(regIdKey)) ||
-          (phone && ymd && seenPhoneDates.has(`${phone}_${ymd}`)) ||
-          (regIdKey && ymd && seenRegDates.has(`${regIdKey}_${ymd}`));
+          (p.id && seenTxnIds.has(p.id)) ||
+          (p.appointmentId && seenAppointmentIds.has(p.appointmentId)) ||
+          hasPhoneCollision ||
+          (regIdKey && !isGenericFallback(regIdKey) && ymd && seenRegDates.has(`${regIdKey}_${ymd}`));
 
         if (inTransactions) continue; // Skip duplicates
 
@@ -725,8 +673,10 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
             status: 'PAID'
           });
 
-          if (phone && ymd) seenPhoneDates.add(`${phone}_${ymd}`);
-          if (regIdKey && ymd) seenRegDates.add(`${regIdKey}_${ymd}`);
+          if (p.id) seenTxnIds.add(p.id);
+          if (p.appointmentId) seenAppointmentIds.add(p.appointmentId);
+          if (phone && !isClinicOrDummyPhone(phone) && ymd) seenPhoneDates.add(`${phone}_${ymd}`);
+          if (regIdKey && !isGenericFallback(regIdKey) && ymd) seenRegDates.add(`${regIdKey}_${ymd}`);
         }
       }
 
@@ -735,7 +685,7 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
       // =========================================================================
       for (const apt of appointmentDocs) {
         if (!apt) continue;
-        const rawDate = apt.appointmentDate || apt.date || apt.createdAt;
+        const rawDate = apt.paymentCollectedAt || apt.paidAt || apt.paymentDate || apt.appointmentDate || apt.date || apt.updatedAt || apt.createdAt;
         const ymd = normalizeToYMD(rawDate) || todayStr;
         const phone = String(apt.phoneNumber || apt.phone || apt.mobile || '').replace(/\D/g, '').slice(-10);
 
@@ -755,20 +705,29 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
         const regIdKey = resolvedRegId.toLowerCase().trim();
 
         // Check if already accounted for in alltransactions or patient billing
+        const hasPhoneCollision = phone && !isClinicOrDummyPhone(phone) && ymd && seenPhoneDates.has(`${phone}_${ymd}`);
         const inTransactions =
           (apt.id && (seenTxnIds.has(apt.id) || seenAppointmentIds.has(apt.id))) ||
-          (phone && ymd && seenPhoneDates.has(`${phone}_${ymd}`)) ||
-          (regIdKey && ymd && seenRegDates.has(`${regIdKey}_${ymd}`));
+          hasPhoneCollision ||
+          (regIdKey && !isGenericFallback(regIdKey) && ymd && seenRegDates.has(`${regIdKey}_${ymd}`));
 
         if (inTransactions) continue; // Skip duplicates
 
         const consultationFee =
+          extractCleanNum(apt.totalPaid) ||
           extractCleanNum(apt.amountPaid) ||
+          extractCleanNum(apt.totalAmount) ||
+          extractCleanNum(apt.paidAmount) ||
           extractCleanNum(apt.consultationFee) ||
-          extractCleanNum(apt.amount);
+          extractCleanNum(apt.fee) ||
+          extractCleanNum(apt.amount) ||
+          extractCleanNum(apt.collectFee) ||
+          extractCleanNum(apt.paymentAmount) ||
+          extractCleanNum(apt.targetAmount) ||
+          (extractCleanNum(apt.consultationFee) + extractCleanNum(apt.medicineFee) + extractCleanNum(apt.pharmacyFee));
 
-        const paymentStatus = String(apt.paymentStatus || '').toLowerCase();
-        const isPaid = paymentStatus === 'paid' || paymentStatus === 'confirmed' || consultationFee > 0;
+        const paymentStatus = String(apt.paymentStatus || apt.status || '').toLowerCase();
+        const isPaid = paymentStatus === 'paid' || paymentStatus === 'confirmed' || paymentStatus === 'completed' || consultationFee > 0;
 
         if (consultationFee > 0 && isPaid) {
           const isPackageOpted =
@@ -819,8 +778,9 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
             status: 'PAID'
           });
 
-          if (phone && ymd) seenPhoneDates.add(`${phone}_${ymd}`);
-          if (regIdKey && ymd) seenRegDates.add(`${regIdKey}_${ymd}`);
+          if (apt.id) seenAppointmentIds.add(String(apt.id));
+          if (phone && !isClinicOrDummyPhone(phone) && ymd) seenPhoneDates.add(`${phone}_${ymd}`);
+          if (regIdKey && !isGenericFallback(regIdKey) && ymd) seenRegDates.add(`${regIdKey}_${ymd}`);
         }
       }
 
@@ -903,6 +863,7 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
             const instId = `${pkg.id}_inst_${idx}`;
 
             if (seenTxnIds.has(instId)) return;
+            if (phone && instYmd && seenPhoneDates.has(`${phone}_${instYmd}`)) return;
             seenTxnIds.add(instId);
 
             records.push({
@@ -937,6 +898,7 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
           if (pkgAmt > 0) {
             const pkgId = String(pkg.id || `PKG-${Math.random().toString(36).substr(2, 6)}`);
             if (seenTxnIds.has(pkgId)) continue;
+            if (phone && ymd && seenPhoneDates.has(`${phone}_${ymd}`)) continue;
             seenTxnIds.add(pkgId);
 
             records.push({
@@ -961,17 +923,95 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
         }
       }
 
+      // Sort records by Date descending (newest transactions first)
+      records.sort((a, b) => {
+        if (b.timestamp !== a.timestamp) {
+          return b.timestamp.localeCompare(a.timestamp);
+        }
+        return String(b.dateTime || b.id).localeCompare(String(a.dateTime || a.id));
+      });
+
       if (records.length > 0) {
         setFirestoreTransactions(records);
+        // Only mark syncing complete and cache when all major collections have reported in
+        const hasCoreCollections = loadedCollections.has('allpatients') || loadedCollections.has('appointments');
+        if (hasCoreCollections || loadedCollections.size >= 3) {
+          setIsSyncingLive(false);
+          try {
+            localStorage.setItem('sph_revenue_cached_records_v5', JSON.stringify(records));
+          } catch (e) {
+            console.warn('LocalStorage revenue cache notice:', e);
+          }
+        }
+      } else {
+        if (loadedCollections.size >= 3) {
+          setIsSyncingLive(false);
+        }
       }
     };
 
-    collections.forEach((colName) => {
-      try {
-        const unsub = onSnapshot(collection(db, colName), (snap) => {
-          colDocs[colName] = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const loadedCollections = new Set<string>();
+
+    let debounceTimer: any = null;
+    const scheduleSync = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      // Run smoothly in idle frames or 150ms debounce to prevent freezing the UI
+      debounceTimer = setTimeout(() => {
+        if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+          (window as any).requestIdleCallback(syncLiveRecords, { timeout: 400 });
+        } else {
           syncLiveRecords();
-        }, (err) => {
+        }
+      }, 150);
+    };
+
+    // Safety timeout: Ensure loading spinner never hangs indefinitely
+    const safetyTimer = setTimeout(() => {
+      setIsSyncingLive(false);
+    }, 8000);
+
+    // Direct robust parallel fetch using getDocs (guarantees data loads immediately)
+    const fetchDirect = async () => {
+      try {
+        const [txSnap, patSnap, aptSnap, pkgSnap] = await Promise.all([
+          getDocs(collection(db, 'alltransactions')).catch((err) => { console.warn('alltransactions getDocs notice:', err); return { docs: [] }; }),
+          getDocs(collection(db, 'allpatients')).catch((err) => { console.warn('allpatients getDocs notice:', err); return { docs: [] }; }),
+          getDocs(collection(db, 'appointments')).catch((err) => { console.warn('appointments getDocs notice:', err); return { docs: [] }; }),
+          getDocs(collection(db, 'package_members')).catch((err) => { console.warn('package_members getDocs notice:', err); return { docs: [] }; })
+        ]);
+
+        if (txSnap.docs.length > 0) colDocs['alltransactions'] = txSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+        if (patSnap.docs.length > 0) colDocs['allpatients'] = patSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+        if (aptSnap.docs.length > 0) colDocs['appointments'] = aptSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+        if (pkgSnap.docs.length > 0) colDocs['package_members'] = pkgSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+
+        loadedCollections.add('alltransactions');
+        loadedCollections.add('allpatients');
+        loadedCollections.add('appointments');
+        loadedCollections.add('package_members');
+
+        syncLiveRecords();
+      } catch (err) {
+        console.warn('AdminTotalRevenuePage direct fetch notice:', err);
+      }
+    };
+
+    fetchDirect();
+
+    const listenerConfigs: Array<{ name: string; queryRef: any }> = [
+      { name: 'alltransactions', queryRef: collection(db, 'alltransactions') },
+      { name: 'allpatients', queryRef: collection(db, 'allpatients') },
+      { name: 'appointments', queryRef: collection(db, 'appointments') },
+      { name: 'package_members', queryRef: collection(db, 'package_members') }
+    ];
+
+    listenerConfigs.forEach(({ name: colName, queryRef }) => {
+      try {
+        const unsub = onSnapshot(queryRef, (snap: any) => {
+          loadedCollections.add(colName);
+          colDocs[colName] = snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+          scheduleSync();
+        }, (err: any) => {
           console.warn(`AdminTotalRevenuePage listener notice for ${colName}:`, err);
         });
         unsubs.push(unsub);
@@ -981,104 +1021,116 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
     });
 
     return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      clearTimeout(safetyTimer);
       unsubs.forEach(u => u());
     };
   }, [todayStr]);
 
-  // Combine Live Records with Seed List
+  // Combine Live Records with Seed List & receptionDataStore Fallback
   const transactions: TransactionRecord[] = useMemo(() => {
     let baseList: TransactionRecord[] = [];
 
     if (firestoreTransactions.length > 0) {
       baseList = [...firestoreTransactions];
-    } else if (liveData && liveData.length > 0) {
-      baseList = liveData.map((item, idx) => {
-        const totalPaid =
-          extractCleanNum(item.amount) ||
-          extractCleanNum(item.totalPaid) ||
-          extractCleanNum(item.paidAmount) ||
-          extractCleanNum(item.totalAmount) ||
-          extractCleanNum(item.pharmacyFee) ||
-          (extractCleanNum(item.consultationFee) + extractCleanNum(item.medicineFee));
-
-        const ymd = normalizeToYMD(item.appointmentDate || item.date || item.createdAt) || todayStr;
-        const cFee = extractCleanNum(item.consultationFee) || (totalPaid > 0 ? Math.min(totalPaid, 800) : 0);
-        const mFee = extractCleanNum(item.medicineFee || item.pharmacyFee) || Math.max(0, totalPaid - cFee);
-        const method = mapPaymentMethod(item.paymentMode || item.paymentMethod);
-
-        let liveSource = cleanPatientSource(item.marketingSource || item.source || item.leadSource);
-        if (!liveSource) {
-          if (item.phone?.includes('9346423798') || item.patientName?.toLowerCase().includes('tayeba')) {
-            liveSource = 'Old Patient';
-          } else if (item.regId && String(item.regId).includes('rk/')) {
-            liveSource = 'Old Patient';
-          } else {
-            liveSource = 'Walk-in';
-          }
-        }
-
-        let resolvedRegId = extractCleanRegId(item);
-        if (!resolvedRegId && (item.phone?.includes('9346423798') || String(item.patientName || item.name || '').toLowerCase().includes('tayeba'))) {
-          resolvedRegId = '863rk/dsnr';
-        }
-        if (!resolvedRegId || isFirestoreAutoId(resolvedRegId)) {
-          const branchShort = mapBranchName(item.branch || item.branchName).slice(0, 3).toLowerCase();
-          resolvedRegId = item.phone ? `863rk/${branchShort}` : `SPH-${branchShort.toUpperCase()}-${idx + 10}`;
-        }
-
-        const isPkg =
-          item.isPackageMember === true ||
-          item.hasActivePackage === true ||
-          item.isCarePackage === true ||
-          item.carePackageId ||
-          String(item.paymentTypePreset || '').toLowerCase() === 'package' ||
-          String(item.revenueSplit || '').toLowerCase().includes('package') ||
-          String(item.planName || '').toLowerCase().includes('care');
-
-        const isDiet =
-          !isPkg &&
-          (item.dietPlanFee > 0 ||
-            String(item.revenueSplit || '').toLowerCase().includes('diet') ||
-            String(item.planName || '').toLowerCase().includes('diet'));
-
-        let revSplit = item.revenueSplit;
-        if (isPkg) {
-          revSplit = 'Package';
-        } else if (isDiet) {
-          revSplit = 'Diet Plan';
-        } else if (!revSplit) {
-          revSplit = mFee > 0 ? 'Consultation & Medicine Fee' : 'Consultation';
-        }
-
-        return {
-          id: item.id || `TXN-${900 + idx}`,
-          patientId: resolvedRegId,
-          patientName: item.patientName || item.name || item.fullName || 'Patient',
-          phone: item.phone || item.phoneNumber || '',
-          branchName: mapBranchName(item.branch || item.branchName, resolvedRegId),
-          doctorName: cleanDoctorName(item.doctorName || item.doctor),
-          revenueSplit: revSplit,
-          source: liveSource,
-          consultationFee: isPkg || isDiet ? 0 : cFee,
-          medicineFee: isPkg || isDiet ? 0 : mFee,
-          packageFee: isPkg || isDiet ? totalPaid : (extractCleanNum(item.packageFee || item.dietFee) || 0),
-          totalAmount: totalPaid || (cFee + mFee),
-          paymentMethod: method,
-          splitDetails: method === 'split' ? { cash: Math.round(totalPaid / 2), upi: Math.round(totalPaid / 2) } : undefined,
-          timestamp: ymd,
-          dateTime: formatDisplayDate(item.createdAt || ymd),
-          status: 'PAID'
-        };
-      });
     } else {
-      baseList = [...SEED_TRANSACTIONS];
+      const fallbackPool =
+        (liveData && liveData.length > 0)
+          ? liveData
+          : (receptionDataStore.getAllCollectionsPool()?.length > 0
+            ? receptionDataStore.getAllCollectionsPool()
+            : receptionDataStore.getAppointments());
+
+      if (fallbackPool && fallbackPool.length > 0) {
+        baseList = fallbackPool.map((item, idx) => {
+          const totalPaid =
+            extractCleanNum(item.amount) ||
+            extractCleanNum(item.totalPaid) ||
+            extractCleanNum(item.paidAmount) ||
+            extractCleanNum(item.totalAmount) ||
+            extractCleanNum(item.pharmacyFee) ||
+            (extractCleanNum(item.consultationFee) + extractCleanNum(item.medicineFee));
+
+          const ymd = normalizeToYMD(item.appointmentDate || item.date || item.createdAt) || todayStr;
+          const cFee = extractCleanNum(item.consultationFee) || (totalPaid > 0 ? Math.min(totalPaid, 800) : 0);
+          const mFee = extractCleanNum(item.medicineFee || item.pharmacyFee) || Math.max(0, totalPaid - cFee);
+          const method = mapPaymentMethod(item.paymentMode || item.paymentMethod);
+
+          let liveSource = cleanPatientSource(item.marketingSource || item.source || item.leadSource);
+          if (!liveSource) {
+            if (item.phone?.includes('9346423798') || item.patientName?.toLowerCase().includes('tayeba')) {
+              liveSource = 'Old Patient';
+            } else if (item.regId && String(item.regId).includes('rk/')) {
+              liveSource = 'Old Patient';
+            } else {
+              liveSource = 'Walk-in';
+            }
+          }
+
+          let resolvedRegId = extractCleanRegId(item);
+          if (!resolvedRegId && (item.phone?.includes('9346423798') || String(item.patientName || item.name || '').toLowerCase().includes('tayeba'))) {
+            resolvedRegId = '863rk/dsnr';
+          }
+          if (!resolvedRegId || isFirestoreAutoId(resolvedRegId)) {
+            const branchShort = mapBranchName(item.branch || item.branchName).slice(0, 3).toLowerCase();
+            resolvedRegId = item.phone ? `863rk/${branchShort}` : `SPH-${branchShort.toUpperCase()}-${idx + 10}`;
+          }
+
+          const isPkg =
+            item.isPackageMember === true ||
+            item.hasActivePackage === true ||
+            item.isCarePackage === true ||
+            item.carePackageId ||
+            String(item.paymentTypePreset || '').toLowerCase() === 'package' ||
+            String(item.revenueSplit || '').toLowerCase().includes('package') ||
+            String(item.planName || '').toLowerCase().includes('care');
+
+          const isDiet =
+            !isPkg &&
+            (item.dietPlanFee > 0 ||
+              String(item.revenueSplit || '').toLowerCase().includes('diet') ||
+              String(item.planName || '').toLowerCase().includes('diet'));
+
+          let revSplit = item.revenueSplit;
+          if (isPkg) {
+            revSplit = 'Package';
+          } else if (isDiet) {
+            revSplit = 'Diet Plan';
+          } else if (!revSplit) {
+            revSplit = mFee > 0 ? 'Consultation & Medicine Fee' : 'Consultation';
+          }
+
+          return {
+            id: item.id || `TXN-${900 + idx}`,
+            patientId: resolvedRegId,
+            patientName: item.patientName || item.name || item.fullName || 'Patient',
+            phone: item.phone || item.phoneNumber || '',
+            branchName: mapBranchName(item.branch || item.branchName, resolvedRegId),
+            doctorName: cleanDoctorName(item.doctorName || item.doctor),
+            revenueSplit: revSplit,
+            source: liveSource,
+            consultationFee: isPkg || isDiet ? 0 : cFee,
+            medicineFee: isPkg || isDiet ? 0 : mFee,
+            packageFee: isPkg || isDiet ? totalPaid : (extractCleanNum(item.packageFee || item.dietFee) || 0),
+            totalAmount: totalPaid || (cFee + mFee),
+            paymentMethod: method,
+            splitDetails: method === 'split' ? { cash: Math.round(totalPaid / 2), upi: Math.round(totalPaid / 2) } : undefined,
+            timestamp: ymd,
+            dateTime: formatDisplayDate(item.createdAt || ymd),
+            status: 'PAID'
+          };
+        });
+      } else {
+        baseList = [];
+      }
     }
 
-    // Ensure Tayeba seed is present if not already in baseList
-    const hasTayeba = baseList.some(t => t.phone.includes('9346423798') || t.patientName.toLowerCase().includes('tayeba'));
-    if (!hasTayeba) {
-      baseList.unshift(SEED_TRANSACTIONS[0]);
-    }
+    baseList.sort((a, b) => {
+      if (b.timestamp !== a.timestamp) {
+        return b.timestamp.localeCompare(a.timestamp);
+      }
+      return String(b.dateTime || b.id).localeCompare(String(a.dateTime || a.id));
+    });
 
     return baseList;
   }, [liveData, firestoreTransactions, todayStr]);
@@ -1096,6 +1148,8 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
     setRevenueSplitType('all');
     setRevenueAmountRange('all');
     setDateMode('this_month');
+    setSortField('date');
+    setSortDirection('desc');
     setCurrentPage(1);
   };
 
@@ -1227,6 +1281,26 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
       }
 
       return true;
+    }).sort((a, b) => {
+      if (sortField === 'amount') {
+        const diff = b.totalAmount - a.totalAmount;
+        return sortDirection === 'desc' ? diff : -diff;
+      }
+      if (sortField === 'name') {
+        const diff = a.patientName.localeCompare(b.patientName);
+        return sortDirection === 'desc' ? -diff : diff;
+      }
+      if (sortField === 'branch') {
+        const diff = a.branchName.localeCompare(b.branchName);
+        return sortDirection === 'desc' ? -diff : diff;
+      }
+      // Default: sortField === 'date'
+      if (b.timestamp !== a.timestamp) {
+        const dateDiff = b.timestamp.localeCompare(a.timestamp);
+        return sortDirection === 'desc' ? dateDiff : -dateDiff;
+      }
+      const timeDiff = String(b.dateTime || b.id).localeCompare(String(a.dateTime || a.id));
+      return sortDirection === 'desc' ? timeDiff : -timeDiff;
     });
   }, [
     transactions,
@@ -1242,7 +1316,9 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
     revenueAmountRange,
     dateMode,
     todayStr,
-    thisMonthStr
+    thisMonthStr,
+    sortField,
+    sortDirection
   ]);
 
   // --- Financial Aggregations ---
@@ -1369,9 +1445,25 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
                 <IndianRupee size={20} />
               </div>
               <div>
-                <h1 style={{ fontSize: '17px', fontWeight: 800, color: '#0f172a', margin: 0 }}>
-                  Admin Total Revenue Analytics
-                </h1>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                  <h1 style={{ fontSize: '17px', fontWeight: 800, color: '#0f172a', margin: 0 }}>
+                    Admin Total Revenue Analytics
+                  </h1>
+                  <span style={{
+                    fontSize: '10.5px',
+                    fontWeight: 700,
+                    background: isSyncingLive ? '#eff6ff' : '#f0fdf4',
+                    color: isSyncingLive ? '#0284c7' : '#16a34a',
+                    border: `1px solid ${isSyncingLive ? '#bae6fd' : '#bbf7d0'}`,
+                    padding: '2px 8px',
+                    borderRadius: '6px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                  }}>
+                    {isSyncingLive ? '⚡ Live Syncing...' : '✓ Synced'}
+                  </span>
+                </div>
                 <p style={{ color: '#64748b', fontSize: '11px', margin: '2px 0 0 0' }}>
                   Real-time collections, consultation vs medicine revenue breakdown, and branch financial ledger
                 </p>
@@ -1800,7 +1892,7 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
 
           {/* TRANSACTIONS TABLE */}
           <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 1px 6px rgba(0,0,0,0.02)' }}>
-            <div style={{ padding: '10px 14px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#f8fafc' }}>
+            <div style={{ padding: '10px 14px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#f8fafc', flexWrap: 'wrap', gap: '8px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span style={{ fontSize: '11.5px', fontWeight: 800, color: '#0f172a' }}>
                   Transaction Logs
@@ -1809,9 +1901,44 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
                   {filteredTransactions.length} records
                 </span>
               </div>
-              <span style={{ fontSize: '10px', color: '#64748b' }}>
-                Showing live revenue across all clinic branches
-              </span>
+
+              {/* Interactive React Sort Controls */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                  <span style={{ fontSize: '10.5px', fontWeight: 700, color: '#475569', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <ArrowUpDown size={12} color="#0284c7" /> Sort By:
+                  </span>
+                  <select
+                    value={`${sortField}_${sortDirection}`}
+                    onChange={(e) => {
+                      const [f, d] = e.target.value.split('_');
+                      setSortField(f as any);
+                      setSortDirection(d as any);
+                      setCurrentPage(1);
+                    }}
+                    style={{
+                      padding: '4px 8px',
+                      borderRadius: '6px',
+                      border: '1px solid #cbd5e1',
+                      fontSize: '10.5px',
+                      fontWeight: 700,
+                      background: '#ffffff',
+                      color: '#0f172a',
+                      outline: 'none',
+                      cursor: 'pointer',
+                      boxShadow: '0 1px 2px rgba(0,0,0,0.03)'
+                    }}
+                  >
+                    <option value="date_desc">⏱️ Date: Newest First (Default)</option>
+                    <option value="date_asc">⏱️ Date: Oldest First</option>
+                    <option value="amount_desc">💰 Amount: Highest First</option>
+                    <option value="amount_asc">💰 Amount: Lowest First</option>
+                    <option value="name_asc">👤 Patient Name: A to Z</option>
+                    <option value="name_desc">👤 Patient Name: Z to A</option>
+                    <option value="branch_asc">🏥 Branch: A to Z</option>
+                  </select>
+                </div>
+              </div>
             </div>
 
             <div style={{ overflowX: 'auto', width: '100%' }}>
@@ -1819,23 +1946,79 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
                 <thead>
                   <tr style={{ background: '#ffffff', borderBottom: '1px solid #e2e8f0', color: '#64748b', fontSize: '9.5px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.4px', whiteSpace: 'nowrap' }}>
                     <th style={{ padding: '9px 10px' }}>S.No</th>
-                    <th style={{ padding: '9px 10px' }}>Reg ID & Name</th>
+                    <th
+                      onClick={() => handleToggleSort('name')}
+                      style={{ padding: '9px 10px', cursor: 'pointer', userSelect: 'none' }}
+                      title="Click to sort by Name"
+                    >
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                        Reg ID & Name
+                        {sortField === 'name' ? (sortDirection === 'desc' ? <ArrowDown size={11} color="#0284c7" /> : <ArrowUp size={11} color="#0284c7" />) : <ArrowUpDown size={10} color="#cbd5e1" />}
+                      </div>
+                    </th>
                     <th style={{ padding: '9px 10px' }}>Phone</th>
-                    <th style={{ padding: '9px 10px' }}>Branch</th>
+                    <th
+                      onClick={() => handleToggleSort('branch')}
+                      style={{ padding: '9px 10px', cursor: 'pointer', userSelect: 'none' }}
+                      title="Click to sort by Branch"
+                    >
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                        Branch
+                        {sortField === 'branch' ? (sortDirection === 'desc' ? <ArrowDown size={11} color="#0284c7" /> : <ArrowUp size={11} color="#0284c7" />) : <ArrowUpDown size={10} color="#cbd5e1" />}
+                      </div>
+                    </th>
                     <th style={{ padding: '9px 10px' }}>Doctor Treated</th>
                     <th style={{ padding: '9px 10px' }}>Revenue Split</th>
                     <th style={{ padding: '9px 10px' }}>Source</th>
-                    <th style={{ padding: '9px 10px' }}>Amount</th>
+                    <th
+                      onClick={() => handleToggleSort('amount')}
+                      style={{ padding: '9px 10px', cursor: 'pointer', userSelect: 'none' }}
+                      title="Click to sort by Amount"
+                    >
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                        Amount
+                        {sortField === 'amount' ? (sortDirection === 'desc' ? <ArrowDown size={11} color="#0284c7" /> : <ArrowUp size={11} color="#0284c7" />) : <ArrowUpDown size={10} color="#cbd5e1" />}
+                      </div>
+                    </th>
                     <th style={{ padding: '9px 10px' }}>Method</th>
-                    <th style={{ padding: '9px 10px' }}>Date / Time</th>
+                    <th
+                      onClick={() => handleToggleSort('date')}
+                      style={{
+                        padding: '9px 10px',
+                        cursor: 'pointer',
+                        userSelect: 'none',
+                        background: sortField === 'date' ? '#eff6ff' : 'transparent',
+                        color: sortField === 'date' ? '#0284c7' : 'inherit'
+                      }}
+                      title="Click to toggle Date sorting (Newest / Oldest)"
+                    >
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                        Date / Time
+                        {sortField === 'date' ? (sortDirection === 'desc' ? <span style={{ fontSize: '9px', fontWeight: 800, background: '#0284c7', color: '#fff', padding: '1px 4px', borderRadius: '4px' }}>⬇ Newest</span> : <span style={{ fontSize: '9px', fontWeight: 800, background: '#0284c7', color: '#fff', padding: '1px 4px', borderRadius: '4px' }}>⬆ Oldest</span>) : <ArrowUpDown size={10} color="#cbd5e1" />}
+                      </div>
+                    </th>
                     <th style={{ padding: '9px 10px' }}>Status</th>
                   </tr>
                 </thead>
                 <tbody>
                   {paginatedTransactions.length === 0 ? (
                     <tr>
-                      <td colSpan={11} style={{ padding: '32px', textAlign: 'center', color: '#64748b', fontSize: '11.5px' }}>
-                        No transactions found matching your filters. Click <b>Reset</b> to view all records.
+                      <td colSpan={11} style={{ padding: '36px', textAlign: 'center', color: '#64748b', fontSize: '11.5px' }}>
+                        {isSyncingLive ? (
+                          <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+                            <div style={{
+                              width: '24px',
+                              height: '24px',
+                              border: '3px solid #e2e8f0',
+                              borderTop: '3px solid #0284c7',
+                              borderRadius: '50%',
+                              animation: 'sphSpin 0.7s linear infinite'
+                            }} />
+                            <span style={{ fontWeight: 600, color: '#0369a1' }}>Syncing revenue records from Firestore...</span>
+                          </div>
+                        ) : (
+                          <>No transactions found matching your filters. Click <b>Reset</b> to view all records.</>
+                        )}
                       </td>
                     </tr>
                   ) : (
@@ -1971,8 +2154,26 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
                 </span>
               </div>
 
-              {/* Right: Previous, Page X of Y, Next */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              {/* Right: First, Previous, Page X of Y, Next, Last */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => setCurrentPage(1)}
+                  disabled={safeCurrentPage <= 1}
+                  style={{
+                    padding: '6px 10px',
+                    borderRadius: '8px',
+                    border: '1px solid #cbd5e1',
+                    background: safeCurrentPage <= 1 ? '#f8fafc' : '#ffffff',
+                    color: safeCurrentPage <= 1 ? '#94a3b8' : '#0f172a',
+                    fontWeight: 700,
+                    fontSize: '11px',
+                    cursor: safeCurrentPage <= 1 ? 'not-allowed' : 'pointer'
+                  }}
+                  title="First Page (Newest Records)"
+                >
+                  ⏮ First
+                </button>
+
                 <button
                   onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
                   disabled={safeCurrentPage <= 1}
@@ -2011,6 +2212,24 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
                   }}
                 >
                   Next
+                </button>
+
+                <button
+                  onClick={() => setCurrentPage(totalPages)}
+                  disabled={safeCurrentPage >= totalPages}
+                  style={{
+                    padding: '6px 10px',
+                    borderRadius: '8px',
+                    border: '1px solid #cbd5e1',
+                    background: safeCurrentPage >= totalPages ? '#f8fafc' : '#ffffff',
+                    color: safeCurrentPage >= totalPages ? '#94a3b8' : '#0f172a',
+                    fontWeight: 700,
+                    fontSize: '11px',
+                    cursor: safeCurrentPage >= totalPages ? 'not-allowed' : 'pointer'
+                  }}
+                  title="Last Page (Oldest Records)"
+                >
+                  Last ⏭
                 </button>
               </div>
             </div>
