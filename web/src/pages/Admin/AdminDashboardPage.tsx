@@ -2657,7 +2657,12 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({ currentB
 
         {/* TAB: REPORTS & VISUAL ANALYTICS */}
         {activeTab === 'reports_analytics' && (
-          <ReportsAnalyticsPage />
+          <ReportsAnalyticsPage liveTransactions={adminRevenueLiveData} />
+        )}
+
+        {/* TAB: AVERAGE PATIENT & DURATION ANALYTICS (ARPU) */}
+        {activeTab === 'average_analytics' && (
+          <AveragePatientAnalyticsPage liveTransactions={adminRevenueLiveData} />
         )}
 
         {/* TAB 6: FINANCE, TOTAL & NUTRITION REVENUE */}

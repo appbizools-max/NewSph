@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { collection, onSnapshot } from 'firebase/firestore';
 import { db } from '@app/shared';
+import { receptionDataStore } from '../../../utils/receptionDataStore';
 
 // --- Types ---
 export interface PatientAverageRecord {
@@ -208,7 +209,48 @@ const normalizeToYMD = (raw: any): string => {
   return '';
 };
 
-export const AveragePatientAnalyticsPage: React.FC = () => {
+export interface AveragePatientAnalyticsPageProps {
+  liveTransactions?: any[];
+}
+
+export const AveragePatientAnalyticsPage: React.FC<AveragePatientAnalyticsPageProps> = ({ liveTransactions }) => {
+  const [cachedTransactions, setCachedTransactions] = useState<any[]>(() => {
+    try {
+      const cached = localStorage.getItem('sph_revenue_cached_records_v6');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (_) {}
+    try {
+      const pool = receptionDataStore.getAllCollectionsPool();
+      if (pool && pool.length > 0) return pool;
+      return receptionDataStore.getAppointments() || [];
+    } catch (_) {}
+    return [];
+  });
+
+  useEffect(() => {
+    try {
+      receptionDataStore.startListeners();
+    } catch (_) {}
+
+    const unsub = receptionDataStore.subscribe((state) => {
+      if (state.allCollectionsPool && state.allCollectionsPool.length > 0) {
+        setCachedTransactions(state.allCollectionsPool);
+      } else if (state.appointments && state.appointments.length > 0) {
+        setCachedTransactions(state.appointments);
+      }
+    });
+
+    return () => unsub();
+  }, []);
+
+  const effectiveTransactions = useMemo(() => {
+    if (liveTransactions && liveTransactions.length > 0) return liveTransactions;
+    if (cachedTransactions && cachedTransactions.length > 0) return cachedTransactions;
+    return [];
+  }, [liveTransactions, cachedTransactions]);
   // Live Raw Collection Data
   const [colDocs, setColDocs] = useState<Record<string, any[]>>({});
   const [isLoading, setIsLoading] = useState(true);
@@ -379,13 +421,17 @@ export const AveragePatientAnalyticsPage: React.FC = () => {
       }
     };
 
-    allTxnDocs.forEach((t) => processItem(t, 'Walk-in'));
-    allPatientDocs.forEach((p) => processItem(p, 'Old Patient'));
-    appointmentDocs.forEach((a) => processItem(a, 'Walk-in'));
-    nutritionDocs.forEach((n) => processItem(n, 'Diet Plan'));
+    if (effectiveTransactions.length > 0) {
+      effectiveTransactions.forEach((t) => processItem(t, 'Walk-in'));
+    } else {
+      allTxnDocs.forEach((t) => processItem(t, 'Walk-in'));
+      allPatientDocs.forEach((p) => processItem(p, 'Old Patient'));
+      appointmentDocs.forEach((a) => processItem(a, 'Walk-in'));
+      nutritionDocs.forEach((n) => processItem(n, 'Diet Plan'));
+    }
 
     return Array.from(patientGroups.values());
-  }, [colDocs, currentMonthPrefix]);
+  }, [colDocs, currentMonthPrefix, effectiveTransactions]);
 
   // Filtered Patient Records
   const filteredRecords = useMemo(() => {
@@ -405,6 +451,11 @@ export const AveragePatientAnalyticsPage: React.FC = () => {
         if (!rec.date.startsWith(currentMonthPrefix)) return false;
       } else if (selectedTimeframe === 'last_month') {
         if (!rec.date.startsWith(lastMonthPrefix)) return false;
+      } else if (selectedTimeframe === 'last_3_months') {
+        const d = new Date();
+        d.setMonth(d.getMonth() - 2);
+        const threeMoPrefix = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        if (rec.date < threeMoPrefix) return false;
       }
 
       // 4. Search query

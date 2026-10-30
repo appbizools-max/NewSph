@@ -22,6 +22,7 @@ import {
 import { collection, onSnapshot } from 'firebase/firestore';
 import { db } from '@app/shared';
 import { AveragePatientAnalyticsPage } from '../AverageAnalytics/AveragePatientAnalyticsPage';
+import { receptionDataStore } from '../../../utils/receptionDataStore';
 
 // --- Types ---
 interface MonthlyDataPoint {
@@ -55,14 +56,15 @@ const DOCTORS = [
 ];
 
 const SOURCES_LIST = [
-  'Walk-in',
   'Old Patient',
   'Referral',
   'Google',
-  'Instagram',
-  'Practo',
   'Youtube',
-  'Facebook'
+  'Walk-in',
+  'Practo',
+  'Facebook',
+  'Instagram',
+  'Other'
 ];
 
 const SOURCE_COLORS: Record<string, string> = {
@@ -198,7 +200,52 @@ const cleanDoctorName = (name: string): string => {
   return name.startsWith('Dr.') ? name : `Dr. ${name}`;
 };
 
-export const ReportsAnalyticsPage: React.FC = () => {
+export interface ReportsAnalyticsPageProps {
+  liveTransactions?: any[];
+}
+
+export const ReportsAnalyticsPage: React.FC<ReportsAnalyticsPageProps> = ({ liveTransactions }) => {
+  const [cachedTransactions, setCachedTransactions] = useState<any[]>(() => {
+    try {
+      const cached = localStorage.getItem('sph_revenue_cached_records_v6');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (_) {}
+    try {
+      const pool = receptionDataStore.getAllCollectionsPool();
+      if (pool && pool.length > 0) return pool;
+      return receptionDataStore.getAppointments() || [];
+    } catch (_) {}
+    return [];
+  });
+
+  useEffect(() => {
+    try {
+      receptionDataStore.startListeners();
+    } catch (_) {}
+
+    const unsub = receptionDataStore.subscribe((state) => {
+      if (state.allCollectionsPool && state.allCollectionsPool.length > 0) {
+        setCachedTransactions(state.allCollectionsPool);
+      } else if (state.appointments && state.appointments.length > 0) {
+        setCachedTransactions(state.appointments);
+      }
+    });
+
+    return () => unsub();
+  }, []);
+
+  const effectiveTransactions = useMemo(() => {
+    if (liveTransactions && liveTransactions.length > 0) {
+      return liveTransactions;
+    }
+    if (cachedTransactions && cachedTransactions.length > 0) {
+      return cachedTransactions;
+    }
+    return [];
+  }, [liveTransactions, cachedTransactions]);
   // Generate list of the last 6 months keys (e.g. 2026-04 to 2026-09)
   const last6Months = useMemo(() => {
     const list: Array<{ key: string; name: string; short: string; year: number; month: number }> = [];
@@ -387,6 +434,37 @@ export const ReportsAnalyticsPage: React.FC = () => {
       target.doctorBranchBreakdown[doc][bKey] = (target.doctorBranchBreakdown[doc][bKey] || 0) + amount;
     };
 
+    if (effectiveTransactions.length > 0) {
+      for (const item of effectiveTransactions) {
+        if (!item) continue;
+        const rawDate = item.timestamp || item.dateTime || item.date || item.createdAt || item.paymentCollectedAt;
+        const cFee = extractNum(item.consultationFee);
+        const mFee = extractNum(item.medicineFee);
+        const pFee = extractNum(item.packageFee);
+        const totalAmount = extractNum(item.totalAmount) || extractNum(item.amount) || extractNum(item.paidAmount) || (cFee + mFee + pFee);
+
+        let src = item.source ? cleanPatientSource(item.source) : '';
+        if (!src) {
+          const phone = String(item.phone || item.phoneNumber || '').replace(/\D/g, '').slice(-10);
+          const cleanReg = extractCleanRegId(item) || item.patientId || '';
+          src = cleanPatientSource(item.marketingSource || item.leadSource) ||
+                (phone && patientSourceMap.get(phone)) ||
+                (cleanReg && patientSourceMap.get(cleanReg.toLowerCase())) ||
+                'Walk-in';
+        }
+
+        recordRevenue(
+          rawDate,
+          totalAmount,
+          item.branchName || item.branch,
+          item.doctorName || item.doctor || 'Dr. Ramakrishna Chanduri',
+          src,
+          cFee,
+          mFee,
+          pFee
+        );
+      }
+    } else {
     // 1. alltransactions (Primary Source)
     for (const item of allTxnDocs) {
       if (!item) continue;
@@ -593,41 +671,15 @@ export const ReportsAnalyticsPage: React.FC = () => {
         }
       }
     }
-
-    // Baseline historical benchmarks for previous months if not populated in Firestore
-    const lastMonthBaselineSources: Record<string, number> = {
-      'Walk-in': 189000,
-      'Old Patient': 62000,
-      'Referral': 89000,
-      'Google': 95000,
-      'Instagram': 38000,
-      'Practo': 12000,
-      'Youtube': 28000,
-      'Facebook': 8000
-    };
-
-    const prevM = map[previousMonthKey];
-    if (prevM) {
-      if (prevM.totalRevenue === 0) {
-        prevM.totalRevenue = 432713;
-        prevM.transactionCount = 210;
-        prevM.branchBreakdown = { kphb: 154000, nallagandla: 106000, chandanagar: 98000, dilshuknagar: 74713 };
-        prevM.doctorBreakdown = { 'Dr. Ramakrishna Chanduri': 168000, 'Dr. Prashanth K Vaidya': 142000, 'Dr. Jobedah Parveej': 68000, 'Dr. Padma Priya': 54713 };
-      }
-      for (const [sKey, sAmt] of Object.entries(lastMonthBaselineSources)) {
-        if (!prevM.sourceBreakdown[sKey] || prevM.sourceBreakdown[sKey] === 0) {
-          prevM.sourceBreakdown[sKey] = sAmt;
-        }
-      }
     }
 
     return map;
-  }, [last6Months, colDocs, currentMonthKey, previousMonthKey]);
+  }, [last6Months, colDocs, currentMonthKey, previousMonthKey, effectiveTransactions]);
 
-  // Current and Previous Month Points
+  // Current and Previous Month Points (100% Real Live Firestore Data)
   const currentMonthData = monthlyData[currentMonthKey] || {
-    totalRevenue: 312200,
-    transactionCount: 163,
+    totalRevenue: 0,
+    transactionCount: 0,
     branchBreakdown: {},
     sourceBreakdown: {},
     doctorBreakdown: {},
@@ -635,13 +687,33 @@ export const ReportsAnalyticsPage: React.FC = () => {
   };
 
   const previousMonthData = monthlyData[previousMonthKey] || {
-    totalRevenue: 432713,
-    transactionCount: 210,
+    totalRevenue: 0,
+    transactionCount: 0,
     branchBreakdown: {},
     sourceBreakdown: {},
     doctorBreakdown: {},
     doctorBranchBreakdown: {}
   };
+
+  // Dynamic Leading Branch from Real Data
+  const leadingBranchInfo = useMemo(() => {
+    let topBranch = FOUR_BRANCHES[0];
+    let topAmt = 0;
+    FOUR_BRANCHES.forEach((b) => {
+      const amt = currentMonthData.branchBreakdown[b.id] || 0;
+      if (amt > topAmt) {
+        topAmt = amt;
+        topBranch = b;
+      }
+    });
+    const total = currentMonthData.totalRevenue || 1;
+    const pct = (topAmt / total) * 100;
+    return {
+      name: topBranch.name,
+      amount: topAmt,
+      percentage: pct
+    };
+  }, [currentMonthData]);
 
   // MoM Growth Calculation
   const momRevenueGrowth = useMemo(() => {
@@ -650,48 +722,351 @@ export const ReportsAnalyticsPage: React.FC = () => {
     return (diff / previousMonthData.totalRevenue) * 100;
   }, [currentMonthData, previousMonthData]);
 
-  // --- Interactive MoM Source Comparison Tool State ---
-  const [selectedComparisonSource, setSelectedComparisonSource] = useState<string>('Walk-in');
-  const [selectedComparisonBranch, setSelectedComparisonBranch] = useState<string>('all');
+  // --- Patient Sources Time Filter State ---
+  type SourceTimeFilter = 'this_month' | 'last_month' | 'last_3_months' | 'last_6_months' | 'all' | 'custom';
+  const [sourceTimeFilter, setSourceTimeFilter] = useState<SourceTimeFilter>('this_month');
+  const [customFromDate, setCustomFromDate] = useState<string>(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
+  });
+  const [customToDate, setCustomToDate] = useState<string>(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
 
-  const sourceComparisonStats = useMemo(() => {
-    const src = selectedComparisonSource;
-    const b = selectedComparisonBranch;
+  // Calculate Date Bounds
+  const { filterStartDate, filterEndDate, filterLabel } = useMemo(() => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = now.getMonth(); // 0-based
 
-    let thisMonthVal = 0;
-    let lastMonthVal = 0;
+    if (sourceTimeFilter === 'this_month') {
+      const start = new Date(y, m, 1);
+      const end = new Date(y, m + 1, 0);
+      return {
+        filterStartDate: normalizeToYMD(start),
+        filterEndDate: normalizeToYMD(end),
+        filterLabel: 'This Month'
+      };
+    }
+    if (sourceTimeFilter === 'last_month') {
+      const start = new Date(y, m - 1, 1);
+      const end = new Date(y, m, 0);
+      return {
+        filterStartDate: normalizeToYMD(start),
+        filterEndDate: normalizeToYMD(end),
+        filterLabel: 'Last Month'
+      };
+    }
+    if (sourceTimeFilter === 'last_3_months') {
+      const start = new Date(y, m - 2, 1);
+      const end = new Date(y, m + 1, 0);
+      return {
+        filterStartDate: normalizeToYMD(start),
+        filterEndDate: normalizeToYMD(end),
+        filterLabel: 'Last 3 Months'
+      };
+    }
+    if (sourceTimeFilter === 'last_6_months') {
+      const start = new Date(y, m - 5, 1);
+      const end = new Date(y, m + 1, 0);
+      return {
+        filterStartDate: normalizeToYMD(start),
+        filterEndDate: normalizeToYMD(end),
+        filterLabel: 'Last 6 Months'
+      };
+    }
+    if (sourceTimeFilter === 'all') {
+      return {
+        filterStartDate: '',
+        filterEndDate: '',
+        filterLabel: 'All Time'
+      };
+    }
+    return {
+      filterStartDate: customFromDate,
+      filterEndDate: customToDate,
+      filterLabel: 'Custom Range'
+    };
+  }, [sourceTimeFilter, customFromDate, customToDate]);
 
-    if (b === 'all') {
-      thisMonthVal = currentMonthData.sourceBreakdown[src] || 0;
-      lastMonthVal = previousMonthData.sourceBreakdown[src] || 0;
+  // Dynamic Real-time Calculation of Source & Branch Matrix (Revenue + Unique Patient Count)
+  const filteredSourceBranchData = useMemo(() => {
+    const allTxnDocs = colDocs['alltransactions'] || [];
+    const allPatientDocs = colDocs['allpatients'] || [];
+    const patientDocs = colDocs['patients'] || [];
+    const appointmentDocs = colDocs['appointments'] || [];
+    const nutritionDocs = colDocs['nutrition_plans'] || [];
+    const packageMemberDocs = colDocs['package_members'] || [];
+
+    // Pre-index metadata
+    const patientRegIdMap = new Map<string, string>();
+    const patientSourceMap = new Map<string, string>();
+
+    const scanDocForMeta = (doc: any) => {
+      if (!doc) return;
+      const cleanReg = extractCleanRegId(doc);
+      const phone = String(doc.phoneNumber || doc.phone || doc.mobile || '').replace(/\D/g, '').slice(-10);
+      const docId = String(doc.id || '').trim();
+      const name = String(doc.patientName || doc.name || doc.fullName || '').toLowerCase().trim();
+
+      if (cleanReg) {
+        if (docId) patientRegIdMap.set(docId, cleanReg);
+        if (phone) patientRegIdMap.set(phone, cleanReg);
+        if (doc.patientId && !isFirestoreAutoId(doc.patientId)) patientRegIdMap.set(doc.patientId, cleanReg);
+        if (name) patientRegIdMap.set(name, cleanReg);
+      }
+
+      const src = cleanPatientSource(doc.marketingSource || doc.source || doc.patientSource || doc.leadSource);
+      if (src) {
+        if (phone) patientSourceMap.set(phone, src);
+        if (cleanReg) patientSourceMap.set(cleanReg.toLowerCase(), src);
+        if (docId) patientSourceMap.set(docId, src);
+        if (name) patientSourceMap.set(name, src);
+      } else if (cleanReg && (cleanReg.toLowerCase().includes('rk/') || cleanReg.toLowerCase().includes('sph') || doc.isOldPatient || doc.type === 'follow-up' || doc.isFollowUp)) {
+        if (phone && !patientSourceMap.has(phone)) patientSourceMap.set(phone, 'Old Patient');
+        if (cleanReg && !patientSourceMap.has(cleanReg.toLowerCase())) patientSourceMap.set(cleanReg.toLowerCase(), 'Old Patient');
+      }
+    };
+
+    allPatientDocs.forEach(scanDocForMeta);
+    patientDocs.forEach(scanDocForMeta);
+    appointmentDocs.forEach(scanDocForMeta);
+    packageMemberDocs.forEach(scanDocForMeta);
+
+    // Initialize source map
+    const sourceMap: Record<string, {
+      source: string;
+      totalRevenue: number;
+      uniquePatients: Set<string>;
+      branches: Record<string, { revenue: number; patients: Set<string> }>;
+    }> = {};
+
+    SOURCES_LIST.forEach((s) => {
+      sourceMap[s] = {
+        source: s,
+        totalRevenue: 0,
+        uniquePatients: new Set<string>(),
+        branches: {
+          kphb: { revenue: 0, patients: new Set<string>() },
+          nallagandla: { revenue: 0, patients: new Set<string>() },
+          chandanagar: { revenue: 0, patients: new Set<string>() },
+          dilshuknagar: { revenue: 0, patients: new Set<string>() }
+        }
+      };
+    });
+
+    const resolveSource = (item: any, phone: string, regIdKey: string, patientName: string): string => {
+      let src = cleanPatientSource(item.marketingSource || item.source || item.patientSource || item.leadSource);
+      if (!src) {
+        if (phone && patientSourceMap.has(phone)) src = patientSourceMap.get(phone)!;
+        else if (regIdKey && patientSourceMap.has(regIdKey)) src = patientSourceMap.get(regIdKey)!;
+        else if (regIdKey && (regIdKey.includes('rk/') || regIdKey.includes('sph') || item.isOldPatient || item.type === 'follow-up' || item.isFollowUp)) src = 'Old Patient';
+        else if (patientName && patientSourceMap.has(patientName)) src = patientSourceMap.get(patientName)!;
+        else src = 'Walk-in';
+      }
+      return SOURCES_LIST.includes(src) ? src : 'Other';
+    };
+
+    const seenTxnIds = new Set<string>();
+    const seenApptIds = new Set<string>();
+
+    const recordEntry = (
+      rawDate: any,
+      amt: number,
+      branchRaw: string,
+      src: string,
+      patientKey: string
+    ) => {
+      const ymd = normalizeToYMD(rawDate);
+      if (!ymd) return;
+      if (filterStartDate && ymd < filterStartDate) return;
+      if (filterEndDate && ymd > filterEndDate) return;
+
+      const bKey = mapBranchKey(branchRaw);
+      const cleanSrc = SOURCES_LIST.includes(src) ? src : 'Other';
+
+      if (!sourceMap[cleanSrc]) {
+        sourceMap[cleanSrc] = {
+          source: cleanSrc,
+          totalRevenue: 0,
+          uniquePatients: new Set<string>(),
+          branches: {
+            kphb: { revenue: 0, patients: new Set<string>() },
+            nallagandla: { revenue: 0, patients: new Set<string>() },
+            chandanagar: { revenue: 0, patients: new Set<string>() },
+            dilshuknagar: { revenue: 0, patients: new Set<string>() }
+          }
+        };
+      }
+
+      const entry = sourceMap[cleanSrc];
+      if (amt > 0) {
+        entry.totalRevenue += amt;
+        if (entry.branches[bKey]) {
+          entry.branches[bKey].revenue += amt;
+        }
+      }
+      if (patientKey) {
+        entry.uniquePatients.add(patientKey);
+        if (entry.branches[bKey]) {
+          entry.branches[bKey].patients.add(patientKey);
+        }
+      }
+    };
+
+    if (effectiveTransactions.length > 0) {
+      for (const item of effectiveTransactions) {
+        if (!item) continue;
+        const rawDate = item.timestamp || item.dateTime || item.date || item.createdAt || item.paymentCollectedAt;
+        const totalAmount = extractNum(item.totalAmount) || extractNum(item.amount) || extractNum(item.paidAmount) || (extractNum(item.consultationFee) + extractNum(item.medicineFee) + extractNum(item.packageFee));
+        const phone = String(item.phone || item.phoneNumber || '').replace(/\D/g, '').slice(-10);
+        const resolvedRegId = item.patientId || extractCleanRegId(item);
+        const patientKey = phone || resolvedRegId || String(item.id || item.patientName);
+        let src = item.source ? cleanPatientSource(item.source) : '';
+        if (!src) {
+          src = resolveSource(item, phone, (resolvedRegId || '').toLowerCase(), String(item.patientName || '').toLowerCase());
+        }
+        recordEntry(rawDate, totalAmount, item.branchName || item.branch, src, patientKey);
+      }
     } else {
-      // Use direct branch collections for this source
-      thisMonthVal = currentMonthData.sourceBranchBreakdown?.[src]?.[b] || 0;
-      lastMonthVal = previousMonthData.sourceBranchBreakdown?.[src]?.[b] || 0;
+    // 1. alltransactions
+    for (const item of allTxnDocs) {
+      if (!item) continue;
+      const rawDate = item.timestamp || item.date || item.createdAt;
+      const cFee = extractNum(item.consultationFee) || extractNum(item.itemsPaid?.consultation);
+      const mFee = extractNum(item.medicineFee) || extractNum(item.itemsPaid?.medicine);
+      const pFee = extractNum(item.packageFee) || extractNum(item.itemsPaid?.package);
+      const totalAmount = extractNum(item.amount) || extractNum(item.totalAmount) || extractNum(item.paidAmount) || (cFee + mFee + pFee);
 
-      // If branch breakdown for last month had no direct records, calculate based on branch's share
-      if (lastMonthVal === 0 && (previousMonthData.sourceBreakdown[src] || 0) > 0) {
-        const branchShares: Record<string, number> = { kphb: 0.36, nallagandla: 0.25, chandanagar: 0.24, dilshuknagar: 0.15 };
-        lastMonthVal = Math.round((previousMonthData.sourceBreakdown[src] || 0) * (branchShares[b] || 0.25));
+      if (item.id) seenTxnIds.add(String(item.id));
+      if (item.appointmentId) seenApptIds.add(String(item.appointmentId));
+
+      const phone = String(item.phone || item.phoneNumber || item.mobile || '').replace(/\D/g, '').slice(-10);
+      let resolvedRegId = extractCleanRegId(item);
+      if (!resolvedRegId) {
+        if (item.patientId && patientRegIdMap.has(item.patientId)) resolvedRegId = patientRegIdMap.get(item.patientId)!;
+        else if (phone && patientRegIdMap.has(phone)) resolvedRegId = patientRegIdMap.get(phone)!;
       }
-      if (thisMonthVal === 0 && (currentMonthData.sourceBreakdown[src] || 0) > 0) {
-        const branchShares: Record<string, number> = { kphb: 0.36, nallagandla: 0.25, chandanagar: 0.24, dilshuknagar: 0.15 };
-        thisMonthVal = Math.round((currentMonthData.sourceBreakdown[src] || 0) * (branchShares[b] || 0.25));
-      }
+      const regIdKey = (resolvedRegId || '').toLowerCase().trim();
+      const patientName = String(item.patientName || item.name || '').toLowerCase().trim();
+      const patientKey = phone || regIdKey || String(item.patientId || item.id || patientName);
+
+      const accurateSource = resolveSource(item, phone, regIdKey, patientName);
+      recordEntry(rawDate, totalAmount, item.branch || item.branchName || item.targetBranch, accurateSource, patientKey);
     }
 
-    const diff = thisMonthVal - lastMonthVal;
-    const pct = lastMonthVal > 0 ? (diff / lastMonthVal) * 100 : (thisMonthVal > 0 ? 100 : 0);
+    // 2. allpatients (new patient registrations in period)
+    for (const p of allPatientDocs) {
+      if (!p) continue;
+      const rawDate = p.registrationDate || p.createdAt || p.date;
+      const phone = String(p.phoneNumber || p.phone || p.mobile || '').replace(/\D/g, '').slice(-10);
+      const regIdKey = (extractCleanRegId(p) || '').toLowerCase().trim();
+      const patientName = String(p.patientName || p.name || '').toLowerCase().trim();
+      const patientKey = phone || regIdKey || String(p.id || patientName);
+
+      const accurateSource = resolveSource(p, phone, regIdKey, patientName);
+      recordEntry(rawDate, 0, p.branch || p.branchName || p.targetBranch, accurateSource, patientKey);
+    }
+
+    // 3. appointments
+    for (const apt of appointmentDocs) {
+      if (!apt) continue;
+      if (apt.id && seenApptIds.has(String(apt.id))) continue;
+      const rawDate = apt.date || apt.appointmentDate || apt.createdAt;
+      const cFee = extractNum(apt.consultationFee) || extractNum(apt.fee) || extractNum(apt.amount);
+      const phone = String(apt.phone || apt.phoneNumber || apt.mobile || '').replace(/\D/g, '').slice(-10);
+      const regIdKey = (extractCleanRegId(apt) || '').toLowerCase().trim();
+      const patientName = String(apt.patientName || apt.name || '').toLowerCase().trim();
+      const patientKey = phone || regIdKey || String(apt.id || patientName);
+
+      const accurateSource = resolveSource(apt, phone, regIdKey, patientName);
+      recordEntry(rawDate, cFee, apt.branchName || apt.branch, accurateSource, patientKey);
+    }
+
+    // 4. nutrition_plans
+    for (const nut of nutritionDocs) {
+      if (!nut) continue;
+      const rawDate = nut.paymentCollectedAt || nut.createdAt || nut.date;
+      const amt = extractNum(nut.amount) || extractNum(nut.packageCost) || extractNum(nut.price);
+      const phone = String(nut.phone || nut.phoneNumber || '').replace(/\D/g, '').slice(-10);
+      const patientKey = phone || String(nut.patientId || nut.id || nut.patientName || '');
+      const accurateSource = cleanPatientSource(nut.source || nut.marketingSource) || 'Old Patient';
+      recordEntry(rawDate, amt, nut.branchName || nut.branchId || nut.branch, accurateSource, patientKey);
+    }
+
+    // 5. package_members
+    for (const pkg of packageMemberDocs) {
+      if (!pkg) continue;
+      const phone = String(pkg.phone || pkg.phoneNumber || pkg.mobile || '').replace(/\D/g, '').slice(-10);
+      const regIdKey = (extractCleanRegId(pkg) || '').toLowerCase().trim();
+      const patientName = String(pkg.patientName || pkg.name || '').toLowerCase().trim();
+      const patientKey = phone || regIdKey || String(pkg.id || patientName);
+      const accurateSource = resolveSource(pkg, phone, regIdKey, patientName);
+
+      if (Array.isArray(pkg.paymentHistory) && pkg.paymentHistory.length > 0) {
+        pkg.paymentHistory.forEach((inst: any, idx: number) => {
+          const instAmt = extractNum(inst.amount || inst.paidAmount);
+          if (instAmt <= 0) return;
+          const instDate = inst.date || inst.paymentDate || pkg.startDate || pkg.createdAt;
+          const instId = `${pkg.id}_inst_${idx}`;
+          if (seenTxnIds.has(instId)) return;
+          seenTxnIds.add(instId);
+          recordEntry(instDate, instAmt, pkg.branch || pkg.branchName || pkg.targetBranch, accurateSource, patientKey);
+        });
+      } else {
+        const rawDate = pkg.paymentCollectedAt || pkg.enrolledDate || pkg.paymentDate || pkg.startDate || pkg.createdAt;
+        const pkgAmt = extractNum(pkg.totalPaid) || extractNum(pkg.advancePaid) || extractNum(pkg.paidAmount) || extractNum(pkg.amount);
+        const pkgId = String(pkg.id || '');
+        if (pkgAmt > 0) {
+          if (pkgId && seenTxnIds.has(pkgId)) continue;
+          if (pkgId) seenTxnIds.add(pkgId);
+          recordEntry(rawDate, pkgAmt, pkg.branch || pkg.branchName || pkg.targetBranch, accurateSource, patientKey);
+        }
+      }
+    }
+    }
+
+    // Grand totals
+    let grandTotalRevenue = 0;
+    const allUniquePatients = new Set<string>();
+    const branchTotals: Record<string, { revenue: number; patients: Set<string> }> = {
+      kphb: { revenue: 0, patients: new Set<string>() },
+      nallagandla: { revenue: 0, patients: new Set<string>() },
+      chandanagar: { revenue: 0, patients: new Set<string>() },
+      dilshuknagar: { revenue: 0, patients: new Set<string>() }
+    };
+
+    Object.values(sourceMap).forEach((item) => {
+      grandTotalRevenue += item.totalRevenue;
+      item.uniquePatients.forEach((p) => allUniquePatients.add(p));
+      FOUR_BRANCHES.forEach((b) => {
+        const br = item.branches[b.id];
+        if (br) {
+          branchTotals[b.id].revenue += br.revenue;
+          br.patients.forEach((p) => branchTotals[b.id].patients.add(p));
+        }
+      });
+    });
+
+    // Build sorted array of sources (sorted by patient count descending, then revenue)
+    const sortedSources = Object.values(sourceMap).sort((a, b) => {
+      if (b.uniquePatients.size !== a.uniquePatients.size) {
+        return b.uniquePatients.size - a.uniquePatients.size;
+      }
+      return b.totalRevenue - a.totalRevenue;
+    });
 
     return {
-      source: src,
-      thisMonthVal,
-      lastMonthVal,
-      diff,
-      pct,
-      isPositive: diff >= 0
+      sourceList: sortedSources,
+      grandTotalRevenue,
+      grandTotalPatients: allUniquePatients.size,
+      branchTotals,
+      filterLabel,
+      filterStartDate,
+      filterEndDate
     };
-  }, [selectedComparisonSource, selectedComparisonBranch, currentMonthData, previousMonthData]);
+  }, [colDocs, filterStartDate, filterEndDate, filterLabel, effectiveTransactions]);
 
   // --- SVG Spike Timeline Graph Geometry (Last 6 Months) ---
   const timelineSvgData = useMemo(() => {
@@ -863,7 +1238,7 @@ export const ReportsAnalyticsPage: React.FC = () => {
       </div>
 
       {analyticsTab === 'average_patient' ? (
-        <AveragePatientAnalyticsPage />
+        <AveragePatientAnalyticsPage liveTransactions={effectiveTransactions} />
       ) : (
         <>
           {/* Header Bar */}
@@ -979,16 +1354,277 @@ export const ReportsAnalyticsPage: React.FC = () => {
             </div>
           </div>
           <div style={{ fontSize: '18px', fontWeight: 900, color: '#0f172a', marginTop: '6px' }}>
-            KPHB Branch
+            {leadingBranchInfo.name}
           </div>
           <div style={{ fontSize: '10.5px', fontWeight: 700, color: '#0284c7', marginTop: '6px' }}>
-            ₹{(currentMonthData.branchBreakdown['kphb'] || 0).toLocaleString('en-IN')} (35.9% of Total)
+            ₹{leadingBranchInfo.amount.toLocaleString('en-IN')} ({leadingBranchInfo.percentage.toFixed(1)}% of Total)
           </div>
         </div>
 
       </div>
 
-      {/* ROW 1: 6-MONTH REVENUE TIMELINE (SPIKE GRAPH) */}
+      {/* FILTER BAR FOR PATIENT SOURCES & BRANCH BREAKDOWN (PRIMARY REAL-TIME MATRIX) */}
+      <div style={{
+        background: '#ffffff',
+        border: '1px solid #e2e8f0',
+        borderRadius: '12px',
+        padding: '12px 16px',
+        marginBottom: '14px',
+        boxShadow: '0 1px 4px rgba(0,0,0,0.02)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        flexWrap: 'wrap',
+        gap: '12px'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div style={{ background: '#e0f2fe', padding: '6px', borderRadius: '8px', color: '#0284c7' }}>
+            <Filter size={15} />
+          </div>
+          <div>
+            <span style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a' }}>
+              Patient Acquisition Channels & Branch Matrix (Live Real-Time Data)
+            </span>
+            <span style={{ marginLeft: '8px', fontSize: '10.5px', color: '#64748b' }}>
+              (Filter by period to view dynamic patient count and revenue across branches)
+            </span>
+          </div>
+        </div>
+
+        {/* Filter Buttons */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+          {[
+            { id: 'this_month', label: 'This Month' },
+            { id: 'last_month', label: 'Last Month' },
+            { id: 'last_3_months', label: 'Last 3 Months' },
+            { id: 'last_6_months', label: 'Last 6 Months' },
+            { id: 'all', label: 'All Time' },
+            { id: 'custom', label: 'Custom Range' }
+          ].map((btn) => {
+            const isActive = sourceTimeFilter === btn.id;
+            return (
+              <button
+                key={btn.id}
+                onClick={() => setSourceTimeFilter(btn.id as SourceTimeFilter)}
+                style={{
+                  padding: '5px 12px',
+                  borderRadius: '6px',
+                  border: isActive ? '1px solid #0284c7' : '1px solid #cbd5e1',
+                  background: isActive ? '#0284c7' : '#ffffff',
+                  color: isActive ? '#ffffff' : '#475569',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                {btn.label}
+              </button>
+            );
+          })}
+
+          {/* Custom Date Pickers */}
+          {sourceTimeFilter === 'custom' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: '6px', background: '#f8fafc', padding: '3px 8px', borderRadius: '6px', border: '1px solid #cbd5e1' }}>
+              <span style={{ fontSize: '10px', fontWeight: 700, color: '#64748b' }}>From:</span>
+              <input
+                type="date"
+                value={customFromDate}
+                onChange={(e) => setCustomFromDate(e.target.value)}
+                style={{ fontSize: '11px', padding: '2px 4px', border: '1px solid #cbd5e1', borderRadius: '4px', outline: 'none' }}
+              />
+              <span style={{ fontSize: '10px', fontWeight: 700, color: '#64748b' }}>To:</span>
+              <input
+                type="date"
+                value={customToDate}
+                onChange={(e) => setCustomToDate(e.target.value)}
+                style={{ fontSize: '11px', padding: '2px 4px', border: '1px solid #cbd5e1', borderRadius: '4px', outline: 'none' }}
+              />
+            </div>
+          )}
+
+          <span style={{ background: '#f0fdf4', color: '#16a34a', border: '1px solid #bbf7d0', fontSize: '10.5px', fontWeight: 700, padding: '3px 8px', borderRadius: '6px', marginLeft: '4px' }}>
+            📅 {filteredSourceBranchData.filterLabel}
+          </span>
+        </div>
+      </div>
+
+      {/* TOP PATIENT SOURCES (LEFT) & ALL BRANCHES PATIENT SOURCES MATRIX (RIGHT) */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 1fr) minmax(580px, 2fr)', gap: '14px', marginBottom: '14px' }}>
+
+        {/* Left: Top Patient Sources */}
+        <div style={{
+          background: '#ffffff',
+          border: '1px solid #e2e8f0',
+          borderRadius: '12px',
+          padding: '16px',
+          boxShadow: '0 1px 4px rgba(0,0,0,0.02)'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+            <div>
+              <span style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a' }}>
+                Top Patient Sources ({filteredSourceBranchData.filterLabel})
+              </span>
+              <p style={{ fontSize: '10.5px', color: '#64748b', margin: '2px 0 0 0' }}>
+                Sorted by revenue contribution & unique patients
+              </p>
+            </div>
+            <div style={{ background: '#f1f5f9', padding: '5px', borderRadius: '6px', color: '#64748b' }}>
+              <Users size={14} />
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {filteredSourceBranchData.sourceList.map((item) => {
+              const total = filteredSourceBranchData.grandTotalRevenue || 1;
+              const pct = (item.totalRevenue / total) * 100;
+              const color = SOURCE_COLORS[item.source] || '#64748b';
+              const pCount = item.uniquePatients.size;
+
+              return (
+                <div key={item.source}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', marginBottom: '3px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: color }}></span>
+                      <span style={{ color: '#1e293b', fontWeight: 700 }}>{item.source}</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ fontWeight: 800, color: '#0f172a' }}>₹{item.totalRevenue.toLocaleString('en-IN')}</span>
+                      <span style={{ fontSize: '9.5px', color: '#64748b', fontWeight: 700 }}>({pct.toFixed(1)}%)</span>
+                      <span style={{ fontSize: '9.5px', background: '#e0f2fe', color: '#0284c7', padding: '1px 5px', borderRadius: '4px', fontWeight: 800 }}>
+                        {pCount} {pCount === 1 ? 'pt' : 'pts'}
+                      </span>
+                    </div>
+                  </div>
+                  <div style={{ width: '100%', height: '5px', background: '#f1f5f9', borderRadius: '3px', overflow: 'hidden' }}>
+                    <div style={{ width: `${Math.min(100, pct)}%`, height: '100%', background: color, borderRadius: '3px' }}></div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Right: All Branches Patient Sources Matrix */}
+        <div style={{
+          background: '#ffffff',
+          border: '1px solid #e2e8f0',
+          borderRadius: '12px',
+          overflow: 'hidden',
+          boxShadow: '0 1px 4px rgba(0,0,0,0.02)',
+          display: 'flex',
+          flexDirection: 'column'
+        }}>
+          <div style={{ padding: '12px 16px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#f8fafc' }}>
+            <div>
+              <span style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a' }}>
+                All Branches & Sources Matrix ({filteredSourceBranchData.filterLabel})
+              </span>
+              <p style={{ fontSize: '10.5px', color: '#64748b', margin: '2px 0 0 0' }}>
+                Branch-by-branch patient count per acquisition source (Patient numbers only)
+              </p>
+            </div>
+            <span style={{ fontSize: '9.5px', fontWeight: 800, color: '#0284c7', background: '#e0f2fe', padding: '2px 8px', borderRadius: '6px' }}>
+              👥 Number of Patients Matrix
+            </span>
+          </div>
+
+          <div style={{ overflowX: 'auto', width: '100%' }}>
+            <table style={{ width: '100%', minWidth: '680px', borderCollapse: 'collapse', textAlign: 'left', fontSize: '11px' }}>
+              <thead>
+                <tr style={{ background: '#ffffff', borderBottom: '1px solid #e2e8f0', color: '#64748b', fontSize: '9.5px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.4px' }}>
+                  <th style={{ padding: '10px 14px' }}>Source</th>
+                  {FOUR_BRANCHES.map((b) => (
+                    <th key={b.id} style={{ padding: '10px 12px', textAlign: 'center' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px' }}>
+                        <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: b.color }}></span>
+                        {b.short}
+                      </div>
+                    </th>
+                  ))}
+                  <th style={{ padding: '10px 14px', textAlign: 'right' }}>Total Patients</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredSourceBranchData.sourceList.map((item, idx) => {
+                  const total = filteredSourceBranchData.grandTotalRevenue || 1;
+                  const pct = (item.totalRevenue / total) * 100;
+                  const color = SOURCE_COLORS[item.source] || '#64748b';
+                  const totalPatients = item.uniquePatients.size;
+
+                  return (
+                    <tr key={item.source} style={{ borderBottom: '1px solid #f1f5f9', background: idx % 2 === 0 ? '#ffffff' : '#fafafa' }}>
+                      <td style={{ padding: '10px 14px', fontWeight: 700, color: '#0f172a' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: color }}></span>
+                          <span>{item.source}</span>
+                        </div>
+                      </td>
+
+                      {FOUR_BRANCHES.map((b) => {
+                        const brData = item.branches[b.id] || { revenue: 0, patients: new Set() };
+                        const bPts = brData.patients.size;
+
+                        return (
+                          <td key={b.id} style={{ padding: '10px 12px', textAlign: 'center' }}>
+                            <span style={{
+                              display: 'inline-block',
+                              fontWeight: bPts > 0 ? 800 : 500,
+                              color: bPts > 0 ? '#0f172a' : '#94a3b8',
+                              fontSize: '11.5px',
+                              background: bPts > 0 ? '#f0f9ff' : 'transparent',
+                              padding: bPts > 0 ? '2px 8px' : '2px 4px',
+                              borderRadius: '6px'
+                            }}>
+                              {bPts > 0 ? `${bPts} pts` : '0 pts'}
+                            </span>
+                          </td>
+                        );
+                      })}
+
+                      <td style={{ padding: '10px 14px', textAlign: 'right' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '6px' }}>
+                          <span style={{ fontWeight: 900, color: totalPatients > 0 ? '#0284c7' : '#94a3b8', fontSize: '12px' }}>
+                            {totalPatients} {totalPatients === 1 ? 'pt' : 'pts'}
+                          </span>
+                          {filteredSourceBranchData.grandTotalPatients > 0 && totalPatients > 0 && (
+                            <span style={{ background: '#e0f2fe', color: '#0284c7', fontSize: '9px', fontWeight: 800, padding: '1px 5px', borderRadius: '4px' }}>
+                              {((totalPatients / filteredSourceBranchData.grandTotalPatients) * 100).toFixed(1)}%
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr style={{ background: '#f8fafc', borderTop: '2px solid #cbd5e1', fontWeight: 800 }}>
+                  <td style={{ padding: '10px 14px', color: '#0f172a' }}>Total Patients</td>
+                  {FOUR_BRANCHES.map((b) => {
+                    const bTotal = filteredSourceBranchData.branchTotals[b.id] || { revenue: 0, patients: new Set() };
+                    return (
+                      <td key={b.id} style={{ padding: '10px 12px', textAlign: 'center' }}>
+                        <span style={{ fontWeight: 900, color: '#0284c7', fontSize: '12px' }}>
+                          👥 {bTotal.patients.size} pts
+                        </span>
+                      </td>
+                    );
+                  })}
+                  <td style={{ padding: '10px 14px', textAlign: 'right' }}>
+                    <span style={{ fontWeight: 900, color: '#0f172a', fontSize: '12.5px' }}>
+                      👥 {filteredSourceBranchData.grandTotalPatients} Patients
+                    </span>
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+
+      </div>
+
+      {/* ROW 2: 6-MONTH REVENUE TIMELINE (SPIKE GRAPH) */}
       <div style={{
         background: '#ffffff',
         border: '1px solid #e2e8f0',
@@ -1302,190 +1938,6 @@ export const ReportsAnalyticsPage: React.FC = () => {
 
       </div>
 
-      {/* ROW 3: TOP PATIENT SOURCES & INTERACTIVE MOM COMPARISON TOOL */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: '14px', marginBottom: '14px' }}>
-
-        {/* Left: Top Patient Sources (This Month) */}
-        <div style={{
-          background: '#ffffff',
-          border: '1px solid #e2e8f0',
-          borderRadius: '12px',
-          padding: '16px',
-          boxShadow: '0 1px 4px rgba(0,0,0,0.02)'
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <div>
-              <span style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a' }}>
-                Top Patient Sources (This Month)
-              </span>
-              <p style={{ fontSize: '10.5px', color: '#64748b', margin: '2px 0 0 0' }}>
-                Revenue contribution sorted by patient acquisition channel
-              </p>
-            </div>
-            <div style={{ background: '#f1f5f9', padding: '5px', borderRadius: '6px', color: '#64748b' }}>
-              <Users size={14} />
-            </div>
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {Object.entries(currentMonthData.sourceBreakdown)
-              .sort(([, a], [, b]) => b - a)
-              .map(([src, amt]) => {
-                const total = currentMonthData.totalRevenue || 1;
-                const pct = (amt / total) * 100;
-                const color = SOURCE_COLORS[src] || '#64748b';
-                return (
-                  <div key={src}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', marginBottom: '3px' }}>
-                      <span style={{ color: '#334155', fontWeight: 600 }}>{src}</span>
-                      <div>
-                        <span style={{ fontWeight: 800, color: '#0f172a', marginRight: '6px' }}>₹{amt.toLocaleString('en-IN')}</span>
-                        <span style={{ fontSize: '9.5px', color: '#64748b', fontWeight: 700 }}>({pct.toFixed(1)}%)</span>
-                      </div>
-                    </div>
-                    <div style={{ width: '100%', height: '5px', background: '#f1f5f9', borderRadius: '3px', overflow: 'hidden' }}>
-                      <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: '3px' }}></div>
-                    </div>
-                  </div>
-                );
-              })}
-          </div>
-        </div>
-
-        {/* Right: Interactive MoM Source Comparison Module (Exact User Specification) */}
-        <div style={{
-          background: '#ffffff',
-          border: '1px solid #e2e8f0',
-          borderRadius: '12px',
-          padding: '16px',
-          boxShadow: '0 1px 4px rgba(0,0,0,0.02)',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'space-between'
-        }}>
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-              <div>
-                <span style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a' }}>
-                  {sourceComparisonStats.source} - MoM Comparison
-                </span>
-                <p style={{ fontSize: '10.5px', color: '#64748b', margin: '2px 0 0 0' }}>
-                  Comparative analysis across months for any patient source & branch
-                </p>
-              </div>
-              <span style={{ fontSize: '9.5px', fontWeight: 800, color: '#8b5cf6', background: '#f3e8ff', padding: '2px 8px', borderRadius: '6px' }}>
-                Interactive Delta
-              </span>
-            </div>
-
-            {/* Filter Dropdowns: Branch + Compare Sources... */}
-            <div style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
-              <div style={{ flex: 1 }}>
-                <label style={{ fontSize: '9.5px', fontWeight: 700, color: '#475569', display: 'block', marginBottom: '3px' }}>
-                  Branch Scope
-                </label>
-                <select
-                  value={selectedComparisonBranch}
-                  onChange={(e) => setSelectedComparisonBranch(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '5px 8px',
-                    borderRadius: '6px',
-                    border: '1px solid #cbd5e1',
-                    fontSize: '11px',
-                    fontWeight: 600,
-                    background: '#f8fafc',
-                    outline: 'none'
-                  }}
-                >
-                  <option value="all">All Branches</option>
-                  <option value="kphb">KPHB Branch</option>
-                  <option value="nallagandla">Nallagandla Branch</option>
-                  <option value="chandanagar">Chandanagar Branch</option>
-                  <option value="dilshuknagar">Dilshuknagar Branch</option>
-                </select>
-              </div>
-
-              <div style={{ flex: 1 }}>
-                <label style={{ fontSize: '9.5px', fontWeight: 700, color: '#475569', display: 'block', marginBottom: '3px' }}>
-                  Compare Sources...
-                </label>
-                <select
-                  value={selectedComparisonSource}
-                  onChange={(e) => setSelectedComparisonSource(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '5px 8px',
-                    borderRadius: '6px',
-                    border: '1px solid #cbd5e1',
-                    fontSize: '11px',
-                    fontWeight: 600,
-                    background: '#f8fafc',
-                    outline: 'none'
-                  }}
-                >
-                  {SOURCES_LIST.map((s) => (
-                    <option key={s} value={s}>{s}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {/* 2 Big Comparison Cards: This Month vs Last Month */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px', marginBottom: '12px' }}>
-              <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '10px', padding: '10px 12px' }}>
-                <span style={{ fontSize: '10px', fontWeight: 700, color: '#166534', textTransform: 'uppercase' }}>
-                  This Month
-                </span>
-                <div style={{ fontSize: '18px', fontWeight: 900, color: '#16a34a', marginTop: '4px' }}>
-                  ₹{sourceComparisonStats.thisMonthVal.toLocaleString('en-IN')}
-                </div>
-              </div>
-
-              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '10px 12px' }}>
-                <span style={{ fontSize: '10px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase' }}>
-                  Last Month
-                </span>
-                <div style={{ fontSize: '18px', fontWeight: 900, color: '#475569', marginTop: '4px' }}>
-                  ₹{sourceComparisonStats.lastMonthVal.toLocaleString('en-IN')}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Difference Banner */}
-          <div style={{
-            background: sourceComparisonStats.isPositive ? '#ecfdf5' : '#fef2f2',
-            border: `1px solid ${sourceComparisonStats.isPositive ? '#a7f3d0' : '#fecaca'}`,
-            borderRadius: '8px',
-            padding: '8px 12px',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center'
-          }}>
-            <div>
-              <span style={{ fontSize: '10px', fontWeight: 700, color: '#475569' }}>Difference (Delta)</span>
-              <div style={{
-                fontSize: '13px',
-                fontWeight: 900,
-                color: sourceComparisonStats.isPositive ? '#15803d' : '#b91c1c'
-              }}>
-                {sourceComparisonStats.diff >= 0 ? `+₹${sourceComparisonStats.diff.toLocaleString('en-IN')}` : `-₹${Math.abs(sourceComparisonStats.diff).toLocaleString('en-IN')}`}
-              </div>
-            </div>
-            <div style={{
-              background: sourceComparisonStats.isPositive ? '#16a34a' : '#ef4444',
-              color: '#ffffff',
-              fontSize: '10px',
-              fontWeight: 800,
-              padding: '3px 8px',
-              borderRadius: '6px'
-            }}>
-              {sourceComparisonStats.pct >= 0 ? `+${sourceComparisonStats.pct.toFixed(1)}%` : `${sourceComparisonStats.pct.toFixed(1)}%`}
-            </div>
-          </div>
-        </div>
-      </div>
       {/* ROW 4: DOCTOR-WISE & DOCTOR-BRANCH REVENUE MATRIX */}
       <div style={{
         background: '#ffffff',

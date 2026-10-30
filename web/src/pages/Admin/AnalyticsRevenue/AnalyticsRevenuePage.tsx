@@ -1524,7 +1524,7 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
       </div>
 
       {pageViewMode === 'reports' ? (
-        <ReportsAnalyticsPage />
+        <ReportsAnalyticsPage liveTransactions={transactions} />
       ) : (
         <>
           {/* Header Bar */}
