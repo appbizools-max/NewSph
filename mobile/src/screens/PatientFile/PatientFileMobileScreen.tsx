@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   StyleSheet, Text, View, ScrollView, TouchableOpacity,
   TextInput, Image, Alert, Modal, FlatList, Dimensions, Platform, PanResponder,
-  ActivityIndicator, BackHandler
+  ActivityIndicator, BackHandler, Linking, SafeAreaView
 } from 'react-native';
 import { Feather, MaterialCommunityIcons, Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -14,7 +14,7 @@ import { getStorage, ref as storageRef, uploadString, uploadBytes, getDownloadUR
 import { getApp, getApps, initializeApp } from 'firebase/app';
 import { sanitizeDoctorName } from '@app/shared';
 import { receptionDataStore } from '../../utils/receptionDataStore';
-
+import { AppointmentPaymentModal } from '../../components/AppointmentPaymentModal';
 // Safe Firebase Storage reference
 const getFirebaseStorage = () => {
   try {
@@ -32,9 +32,7 @@ const getFirebaseStorage = () => {
     return null;
   }
 };
-
 const db = getSafeDb();
-
 // Polyfill global.Blob in React Native to support ArrayBuffer & Uint8Array without throwing
 if (typeof global !== 'undefined' && (global as any).Blob) {
   try {
@@ -156,7 +154,7 @@ const uploadPrescriptionToStorage = async (dataOrUri: string, patId?: string): P
       try {
         const parsed = JSON.parse(uploadResult.body);
         downloadTokens = parsed.downloadTokens || '';
-      } catch (_) {}
+      } catch (_) { }
       const publicUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodedPath}?alt=media&token=${downloadTokens}`;
       console.log('Firebase storage upload SUCCESS (native) ->', publicUrl);
       return publicUrl;
@@ -169,7 +167,7 @@ const uploadPrescriptionToStorage = async (dataOrUri: string, patId?: string): P
     if (isTempFile) {
       try {
         await FileSystem.deleteAsync(localFileToUpload, { idempotent: true });
-      } catch (_) {}
+      } catch (_) { }
     }
   }
 
@@ -610,25 +608,13 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
 }) => {
   const [activeTab, setActiveTab] = useState<'clinical' | 'diet' | 'media' | 'package'>('clinical');
 
-  // Handle native Android hardware back press directly
-  useEffect(() => {
-    const handleHardwareBack = () => {
-      if (onBack) {
-        onBack();
-        return true;
-      }
-      return false;
-    };
-    const sub = BackHandler.addEventListener('hardwareBackPress', handleHardwareBack);
-    return () => sub.remove();
-  }, [onBack]);
 
   // Patient Info (Clean real data extraction, NO mock fallbacks)
   const isEditPrescriptionOnly = Boolean(patient?.editPrescriptionOnly || patient?.disableAmount || patient?.isEditPrescriptionOnly || patient?.lockPayment);
   const patientName = renderSafeString(patient?.patientName || patient?.fullName || patient?.name || patient?.patient_name || patient?.patient, '');
   const regId = renderSafeString(patient?.registrationId || patient?.regId || patient?.regNo || patient?.patientId || patient?.registrationNo || patient?.uhid || patient?.patient_id, '');
   const phone = renderSafeString(patient?.phone || patient?.phoneNumber || patient?.mobile || patient?.mobileNumber || patient?.contact || patient?.contactNumber || patient?.phoneNo, '');
-  const branchName = renderSafeString(currentBranch || patient?.branch || patient?.branchName || patient?.targetBranch, 'Dilshuknagar Branch');
+  const branchName = renderSafeString(currentBranch || patient?.branch || patient?.branchName || patient?.targetBranch, '');
   const doctorName = formatDoctorName(doctorNameProp || patient?.doctorName || patient?.doctor, branchName);
   const source = renderSafeString(patient?.source || patient?.leadSource || patient?.marketingSource, '');
   const subject = renderSafeString(patient?.diseases || patient?.subject || patient?.complaint || patient?.chiefComplaints, '');
@@ -680,6 +666,8 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
     }
   }, [patient]);
   const [followUpCalendarOpen, setFollowUpCalendarOpen] = useState(false);
+  const [showCollectFeeModal, setShowCollectFeeModal] = useState(false);
+  const [selectedPatientForCollectFee, setSelectedPatientForCollectFee] = useState<any>(null);
   const [followUpCalMonth, setFollowUpCalMonth] = useState<number>(() => {
     const raw = patient?.preferredFollowUpDate || patient?.followUpDate;
     if (raw) {
@@ -1109,11 +1097,25 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
 
       const targetDocId = patient?.id || patient?.appointmentId || patient?.patientId || regId;
 
-      const initialUploadedImages: string[] = [...uploadedImages];
-      if (canvasDataUrl && !initialUploadedImages.includes(canvasDataUrl)) {
+      const initialUploadedImages: string[] = [...uploadedImages].filter(img => !deletedPrescriptionUrlsRef.current.has(img));
+      if (canvasDataUrl && !initialUploadedImages.includes(canvasDataUrl) && !deletedPrescriptionUrlsRef.current.has(canvasDataUrl)) {
         initialUploadedImages.push(canvasDataUrl);
       }
       setUploadedImages(initialUploadedImages);
+
+      const activeCanvas = (canvasDataUrl && !deletedPrescriptionUrlsRef.current.has(canvasDataUrl))
+        ? canvasDataUrl
+        : (patient?.canvasPrescriptionUrl && !deletedPrescriptionUrlsRef.current.has(patient.canvasPrescriptionUrl)
+          ? patient.canvasPrescriptionUrl
+          : '');
+
+      if (patient) {
+        patient.uploadedPrescriptions = initialUploadedImages;
+        patient.prescriptionUrls = initialUploadedImages;
+        patient.prescriptionUrl = initialUploadedImages[0] || '';
+        patient.prescriptionImage = initialUploadedImages[0] || '';
+        patient.canvasPrescriptionUrl = activeCanvas;
+      }
 
       const numDietFee = Number(dietFeeAmount) || 0;
       const numPharmacyFee = Number(pharmacyFee) || 0;
@@ -1130,16 +1132,23 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
         branchName,
         diagnosisNotes,
         drawPrescription,
-        canvasPrescriptionUrl: canvasDataUrl,
+        canvasPrescriptionUrl: activeCanvas,
         followUpInterval,
         preferredFollowUpDate: formatDDMMYYYY(preferredFollowUpDate),
         pharmacyFee,
         uploadedPrescriptions: initialUploadedImages,
+        prescriptionUrls: initialUploadedImages,
+        prescriptionUrl: initialUploadedImages[0] || '',
+        prescriptionImage: initialUploadedImages[0] || '',
         savedAt: new Date().toISOString()
       };
 
       const updatePayload = {
         uploadedPrescriptions: initialUploadedImages,
+        prescriptionUrls: initialUploadedImages,
+        prescriptionUrl: initialUploadedImages[0] || '',
+        prescriptionImage: initialUploadedImages[0] || '',
+        canvasPrescriptionUrl: activeCanvas,
         diagnosisNotes,
         consultationFee: numConsultationFee > 0 ? numConsultationFee : (patient?.consultationFee || 0),
         medicineFee: isEditPrescriptionOnly ? (patient?.medicineFee || 0) : numPharmacyFee,
@@ -1155,7 +1164,6 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
         preferredFollowUpDate: formatDDMMYYYY(preferredFollowUpDate),
         doctorName: docNameToSave,
         doctor: docNameToSave,
-        ...(canvasDataUrl ? { canvasPrescriptionUrl: canvasDataUrl } : {}),
         status: isEditPrescriptionOnly ? (patient?.status || 'completed') : 'collect_fee',
         paymentStatus: isEditPrescriptionOnly ? (patient?.paymentStatus || 'paid') : 'pending',
         paymentPending: isEditPrescriptionOnly ? false : true,
@@ -1220,16 +1228,21 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
             ...imageJobs
           ]);
 
-          finalCanvasUrl = resolvedCanvas;
-          const sanitizedImages: string[] = resolvedImages.filter((img): img is string => Boolean(img));
-          if (finalCanvasUrl && !sanitizedImages.includes(finalCanvasUrl)) {
+          finalCanvasUrl = (resolvedCanvas && !deletedPrescriptionUrlsRef.current.has(resolvedCanvas)) ? resolvedCanvas : null;
+          const sanitizedImages: string[] = resolvedImages
+            .filter((img): img is string => Boolean(img))
+            .filter(img => !deletedPrescriptionUrlsRef.current.has(img));
+          if (finalCanvasUrl && !sanitizedImages.includes(finalCanvasUrl) && !deletedPrescriptionUrlsRef.current.has(finalCanvasUrl)) {
             sanitizedImages.push(finalCanvasUrl);
           }
 
           const finalCloudPayload = {
             ...basePayload,
             uploadedPrescriptions: sanitizedImages,
-            canvasPrescriptionUrl: finalCanvasUrl,
+            prescriptionUrls: sanitizedImages,
+            prescriptionUrl: sanitizedImages[0] || '',
+            prescriptionImage: sanitizedImages[0] || '',
+            canvasPrescriptionUrl: finalCanvasUrl || '',
             appointmentId: targetDocId,
             appointmentDate: patient?.appointmentDate || patient?.date || new Date().toISOString().split('T')[0],
             doctorName: docNameToSave,
@@ -1247,7 +1260,10 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
           const finalUpdatePayload = {
             ...updatePayload,
             uploadedPrescriptions: sanitizedImages,
-            ...(finalCanvasUrl ? { canvasPrescriptionUrl: finalCanvasUrl } : {}),
+            prescriptionUrls: sanitizedImages,
+            prescriptionUrl: sanitizedImages[0] || '',
+            prescriptionImage: sanitizedImages[0] || '',
+            canvasPrescriptionUrl: finalCanvasUrl || '',
           };
 
           if (targetDocId) {
@@ -1402,7 +1418,8 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
             applyDietPlanData(data.dietPlan);
           }
           if (Array.isArray(data?.uploadedPrescriptions)) {
-            setUploadedImages(prev => Array.from(new Set([...prev, ...data.uploadedPrescriptions])));
+            const filtered = data.uploadedPrescriptions.filter((u: string) => !deletedPrescriptionUrlsRef.current.has(u));
+            setUploadedImages(filtered);
           }
         }
       }, (err) => console.log('Mobile appt live sync err:', err));
@@ -1415,7 +1432,8 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
             applyDietPlanData(data.dietPlan);
           }
           if (Array.isArray(data?.uploadedPrescriptions)) {
-            setUploadedImages(prev => Array.from(new Set([...prev, ...data.uploadedPrescriptions])));
+            const filtered = data.uploadedPrescriptions.filter((u: string) => !deletedPrescriptionUrlsRef.current.has(u));
+            setUploadedImages(filtered);
           }
         }
       }, (err) => console.log('Mobile allpatient live sync err:', err));
@@ -1518,17 +1536,151 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
     }, 2800);
   };
 
-  // Tab 3: Share Media State
-  const [sharedMediaList, setSharedMediaList] = useState<string[]>([]);
-  const [showGlobalMediaModal, setShowGlobalMediaModal] = useState(false);
+  // Tab 3: Share Media State (Live from Reception Clinic Media Manager)
+  const isPatientAppBooking = Boolean(
+    patient?.source === 'UserApp' ||
+    patient?.source === 'Patient App' ||
+    patient?.bookingSource === 'Patient App' ||
+    patient?.isAppBooking === true ||
+    patient?.bookedFrom === 'patient_app' ||
+    patient?.isPatientApp === true
+  );
+
+  const [clinicMediaItems, setClinicMediaItems] = useState<any[]>([]);
+  const [sharedPatientMedia, setSharedPatientMedia] = useState<any[]>(() => {
+    if (Array.isArray(patient?.sharedMedia)) return patient.sharedMedia;
+    return [];
+  });
+  const [mediaSearchQuery, setMediaSearchQuery] = useState('');
+  const [sharingMediaId, setSharingMediaId] = useState<string | null>(null);
+
+  // Subscribe to Reception clinic_media_items
+  useEffect(() => {
+    if (!db) return;
+    try {
+      const q = collection(db, 'clinic_media_items');
+      const unsub = onSnapshot(q, (snap) => {
+        const list: any[] = [];
+        snap.forEach((d) => {
+          list.push({ id: d.id, ...d.data() });
+        });
+        list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        setClinicMediaItems(list);
+      }, (err) => console.log('Mobile media items load notice:', err));
+      return () => unsub();
+    } catch (e) { }
+  }, [db]);
+
+  // Subscribe to patient's shared media
+  useEffect(() => {
+    if (!db) return;
+    const patId = patient?.id;
+    if (!patId) return;
+    try {
+      const unsub = onSnapshot(doc(db, 'appointments', patId), (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          if (Array.isArray(data.sharedMedia)) {
+            setSharedPatientMedia(data.sharedMedia);
+          }
+        }
+      });
+      return () => unsub();
+    } catch (e) { }
+  }, [db, patient?.id]);
+
+  const handleShareMediaItem = async (mediaItem: any) => {
+    if (!isPatientAppBooking) {
+      Alert.alert(
+        'Sharing Disabled',
+        `Media sharing to the Patient App is disabled because this appointment was booked via ${patient?.source || 'Reception/Web'}. Only appointments booked through the Patient App can receive media.`
+      );
+      return;
+    }
+    const cleanPhone = String(patient?.phone || phone || '').replace(/\D/g, '').slice(-10);
+    const targetDocId = patient?.id;
+    const mediaObj = {
+      id: mediaItem.id || Date.now().toString(),
+      title: mediaItem.title || 'Educational Media',
+      url: mediaItem.url || '',
+      category: mediaItem.category || 'General',
+      notes: mediaItem.notes || '',
+      folderName: mediaItem.folderName || '',
+      doctorName: doctorName || 'Doctor',
+      sharedAt: new Date().toISOString()
+    };
+
+    setSharingMediaId(mediaItem.id || 'new');
+    try {
+      setSharedPatientMedia(prev => {
+        if (prev.some(m => m.url === mediaObj.url || (m.id && m.id === mediaObj.id))) return prev;
+        return [...prev, mediaObj];
+      });
+
+      if (db && targetDocId) {
+        await updateDoc(doc(db, 'appointments', targetDocId), {
+          sharedMedia: arrayUnion(mediaObj),
+          lastUpdated: new Date().toISOString()
+        }).catch(() => { });
+        await updateDoc(doc(db, 'allpatients', targetDocId), {
+          sharedMedia: arrayUnion(mediaObj)
+        }).catch(() => { });
+      }
+
+      if (db) {
+        await addDoc(collection(db, 'shared_patient_media'), {
+          ...mediaObj,
+          patientPhone: cleanPhone,
+          patientName: patientName || 'Patient',
+          regId: regId || '',
+          appointmentId: targetDocId || ''
+        }).catch(() => { });
+      }
+
+      Alert.alert('Media Shared', `"${mediaObj.title}" shared successfully to patient's My Media!`);
+    } catch (err: any) {
+      console.warn('Share media mobile error:', err);
+      Alert.alert('Error', 'Failed to share media: ' + (err.message || 'Error'));
+    } finally {
+      setSharingMediaId(null);
+    }
+  };
+
+  const handleRevokeSharedMedia = async (urlToRevoke: string) => {
+    const targetDocId = patient?.id;
+    const updated = sharedPatientMedia.filter(m => m.url !== urlToRevoke);
+    setSharedPatientMedia(updated);
+
+    if (db && targetDocId) {
+      try {
+        await updateDoc(doc(db, 'appointments', targetDocId), {
+          sharedMedia: updated,
+          lastUpdated: new Date().toISOString()
+        });
+        await updateDoc(doc(db, 'allpatients', targetDocId), {
+          sharedMedia: updated
+        });
+      } catch (e) { }
+    }
+  };
 
   // Tab 4: Register Package State
   const [totalPackageAmount, setTotalPackageAmount] = useState('');
   const [initialAdvancePaid, setInitialAdvancePaid] = useState('0');
   const [packagePurpose, setPackagePurpose] = useState('');
   const [packageDuration, setPackageDuration] = useState('3 Months');
-  const [packageStartDate, setPackageStartDate] = useState('2026-09-07');
-  const [packageEndDate, setPackageEndDate] = useState('2026-12-07');
+  const [packageStartDate, setPackageStartDate] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
+  const [packageEndDate, setPackageEndDate] = useState(() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() + 3);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
+
+  const deletedPrescriptionUrlsRef = React.useRef<Set<string>>(new Set());
+  const lastProcessedPatientIdRef = React.useRef<string | null>(null);
 
   // Uploaded Prescriptions State
   const [uploadedImages, setUploadedImages] = useState<string[]>(() => {
@@ -1564,6 +1716,11 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
 
   useEffect(() => {
     if (!patient) return;
+    const patId = patient.id || patient.patientId || regId;
+    if (lastProcessedPatientIdRef.current === patId) return;
+    lastProcessedPatientIdRef.current = patId;
+    deletedPrescriptionUrlsRef.current.clear();
+
     const list: string[] = [];
     const add = (v: any) => {
       if (!v) return;
@@ -1593,10 +1750,9 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
     add(patient.fileUrl);
     add(patient.reports);
     add(patient.images);
-    if (list.length > 0) {
-      setUploadedImages(prev => Array.from(new Set([...prev, ...list])));
-    }
-  }, [patient]);
+    const deduped = Array.from(new Set(list.filter(Boolean)));
+    setUploadedImages(deduped);
+  }, [patient?.id]);
 
   const [selectedPreviewImage, setSelectedPreviewImage] = useState<string | null>(null);
   const [showAddImageModal, setShowAddImageModal] = useState(false);
@@ -1608,6 +1764,9 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
   const handleAddNewPrescriptionImage = async (imgUrl: string) => {
     if (!imgUrl || !imgUrl.trim()) return;
     let trimmed = imgUrl.trim();
+
+    // If it was previously marked as deleted, unmark it
+    deletedPrescriptionUrlsRef.current.delete(trimmed);
 
     // If it's a data URL, upload to Firebase Storage first
     if (trimmed.startsWith('data:')) {
@@ -1634,15 +1793,18 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
         const appRef = doc(db, 'appointments', patient.id);
         await updateDoc(appRef, {
           uploadedPrescriptions: arrayUnion(trimmed),
+          prescriptionUrls: arrayUnion(trimmed),
           updatedAt: new Date().toISOString()
         }).catch(() => { });
 
         await updateDoc(doc(db, 'allpatients', patient.id), {
-          uploadedPrescriptions: arrayUnion(trimmed)
+          uploadedPrescriptions: arrayUnion(trimmed),
+          prescriptionUrls: arrayUnion(trimmed)
         }).catch(() => { });
 
         await updateDoc(doc(db, 'patients', patient.id), {
-          uploadedPrescriptions: arrayUnion(trimmed)
+          uploadedPrescriptions: arrayUnion(trimmed),
+          prescriptionUrls: arrayUnion(trimmed)
         }).catch(() => { });
       } catch (err) {
         console.log('Firebase mobile upload note:', err);
@@ -1651,24 +1813,48 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
   };
 
   const handleRemoveUploadedImage = async (idx: number) => {
+    const removedUrl = uploadedImages[idx];
+    if (removedUrl) {
+      deletedPrescriptionUrlsRef.current.add(removedUrl);
+    }
     const updated = uploadedImages.filter((_, i) => i !== idx);
     setUploadedImages(updated);
 
-    if (patient?.id && db) {
+    if (patient) {
+      patient.uploadedPrescriptions = updated;
+      patient.prescriptionUrls = updated;
+      if (patient.prescriptionUrl === removedUrl) {
+        patient.prescriptionUrl = updated[0] || '';
+      }
+      if (patient.prescriptionImage === removedUrl) {
+        patient.prescriptionImage = updated[0] || '';
+      }
+      if (patient.canvasPrescriptionUrl === removedUrl) {
+        patient.canvasPrescriptionUrl = '';
+      }
+    }
+
+    const targetDocId = patient?.id || patient?.appointmentId || patient?.patientId || regId;
+    if (targetDocId && db) {
       try {
-        const appRef = doc(db, 'appointments', patient.id);
-        await updateDoc(appRef, {
+        const updatePayload: any = {
           uploadedPrescriptions: updated,
+          prescriptionUrls: updated,
+          prescriptionUrl: updated[0] || '',
+          prescriptionImage: updated[0] || '',
           updatedAt: new Date().toISOString()
-        }).catch(() => { });
+        };
+        if (patient?.canvasPrescriptionUrl === removedUrl || !patient?.canvasPrescriptionUrl) {
+          updatePayload.canvasPrescriptionUrl = '';
+        }
 
-        await updateDoc(doc(db, 'allpatients', patient.id), {
-          uploadedPrescriptions: updated
-        }).catch(() => { });
+        receptionDataStore.updateLocalAppointment(targetDocId, updatePayload);
 
-        await updateDoc(doc(db, 'patients', patient.id), {
-          uploadedPrescriptions: updated
-        }).catch(() => { });
+        const targetCol = patient?.collectionName || 'appointments';
+        const colsToUpdate = Array.from(new Set([targetCol, 'appointments', 'allpatients', 'patients']));
+        for (const col of colsToUpdate) {
+          await updateDoc(doc(db, col, targetDocId), updatePayload).catch(() => { });
+        }
       } catch (err) {
         console.log('Firebase mobile remove image error:', err);
       }
@@ -1707,10 +1893,27 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
     }
 
     try {
-      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!permission.granted) {
-        Alert.alert('Permission Required', 'Please allow gallery access to select prescription photos.');
-        return;
+      if (Platform.OS === 'ios') {
+        const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert(
+            'Permission Required',
+            'Please allow gallery access in Settings to select prescription photos.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Open Settings', onPress: () => Linking.openSettings() }
+            ]
+          );
+          return;
+        }
+      } else {
+        // On Android, launchImageLibraryAsync uses system PhotoPicker without requiring broad media permissions
+        try {
+          const perm = await ImagePicker.getMediaLibraryPermissionsAsync();
+          if (!perm.granted && perm.canAskAgain) {
+            await ImagePicker.requestMediaLibraryPermissionsAsync();
+          }
+        } catch (_) { }
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
@@ -1738,9 +1941,21 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
           setIsUploadingImage(false);
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.warn('Gallery pick error:', err);
-      Alert.alert('Error', 'Could not open device photo gallery.');
+      const isPermError = err?.message?.toLowerCase()?.includes('permission') || err?.code === 'ERR_MISSING_PERMISSION';
+      if (isPermError) {
+        Alert.alert(
+          'Permission Required',
+          'Please allow photo gallery access in Settings to select prescription photos.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Open Settings', onPress: () => Linking.openSettings() }
+          ]
+        );
+      } else {
+        Alert.alert('Error', 'Could not open device photo gallery.');
+      }
     }
   };
 
@@ -1754,7 +1969,14 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
     try {
       const permission = await ImagePicker.requestCameraPermissionsAsync();
       if (!permission.granted) {
-        Alert.alert('Permission Required', 'Please allow camera access to take prescription photos.');
+        Alert.alert(
+          'Permission Required',
+          'Please allow camera access in Settings to take prescription photos.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Open Settings', onPress: () => Linking.openSettings() }
+          ]
+        );
         return;
       }
 
@@ -1800,6 +2022,59 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
   const [selectedVisitModal, setSelectedVisitModal] = useState<any | null>(null);
   const [showAllVisitsModal, setShowAllVisitsModal] = useState(false);
   const [fullPrescriptionPreview, setFullPrescriptionPreview] = useState<string | null>(null);
+  const [previewImagesList, setPreviewImagesList] = useState<string[]>([]);
+  const [previewImageIndex, setPreviewImageIndex] = useState<number>(0);
+  const [previewRotation, setPreviewRotation] = useState<number>(0);
+  const [historyFilterTab, setHistoryFilterTab] = useState<'all' | 'prescriptions' | 'billing'>('all');
+
+  const allVisitedPrescriptionImages = useMemo(() => {
+    const list: Array<{ uri: string; visitDate: string; visitNumber: number; doctorName?: string }> = [];
+    patientVisits.forEach((v, vIdx) => {
+      const vNum = patientVisits.length - vIdx;
+      const vDate = v.visitDate || '';
+      const imgs = Array.from(new Set([
+        ...(v.canvasPrescriptionUrl ? [v.canvasPrescriptionUrl] : []),
+        ...(v.uploadedPrescriptions || [])
+      ].filter(Boolean)));
+      imgs.forEach((uri) => {
+        list.push({ uri, visitDate: vDate, visitNumber: vNum, doctorName: v.doctorName });
+      });
+    });
+    return list;
+  }, [patientVisits]);
+
+  const totalPaidSum = useMemo(() => {
+    return patientVisits.reduce((acc, v) => acc + (Number(v.paidAmount) || 0), 0);
+  }, [patientVisits]);
+
+  const openPrescriptionPreview = (url: string, list?: string[]) => {
+    const activeList = list && list.length > 0 ? list : uploadedImages;
+    const idx = activeList.indexOf(url);
+    setPreviewImagesList(activeList);
+    setPreviewImageIndex(idx >= 0 ? idx : 0);
+    setFullPrescriptionPreview(url);
+    setPreviewRotation(0);
+  };
+
+  const handlePrevPrescriptionImage = () => {
+    if (previewImagesList.length <= 1) return;
+    const nextIdx = previewImageIndex > 0 ? previewImageIndex - 1 : previewImagesList.length - 1;
+    setPreviewImageIndex(nextIdx);
+    setFullPrescriptionPreview(previewImagesList[nextIdx]);
+    setPreviewRotation(0);
+  };
+
+  const handleNextPrescriptionImage = () => {
+    if (previewImagesList.length <= 1) return;
+    const nextIdx = previewImageIndex < previewImagesList.length - 1 ? previewImageIndex + 1 : 0;
+    setPreviewImageIndex(nextIdx);
+    setFullPrescriptionPreview(previewImagesList[nextIdx]);
+    setPreviewRotation(0);
+  };
+
+  const handleRotatePrescriptionImage = () => {
+    setPreviewRotation((prev) => (prev + 90) % 360);
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -1880,7 +2155,29 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
 
       const updateVisitsState = () => {
         if (!isMounted) return;
-        const allList = Array.from(storeMap.values());
+        const allList = Array.from(storeMap.values()).filter(v => {
+          // 1. Exclude future dates (e.g. 30/10/2026 or any date after today)
+          if (v.normalizedDate && v.normalizedDate > todayYMD) return false;
+
+          // 2. Exclude the current ongoing consultation session that is being edited right now
+          if (patient?.id && (v.id === patient.id || v.appointmentId === patient.id)) {
+            const isCompletedCurrent = String(v.status).toLowerCase() === 'completed';
+            const hasCurrentMeds = Array.isArray(v.medicines) && v.medicines.length > 0;
+            const hasCurrentPaid = Number(v.paidAmount) > 0 || String(v.paymentStatus).toLowerCase() === 'paid';
+            if (!isCompletedCurrent && !hasCurrentMeds && !hasCurrentPaid) {
+              return false;
+            }
+          }
+
+          // 3. Strictly require genuine clinical consultation records or paid billing:
+          const hasMeds = Array.isArray(v.medicines) && v.medicines.length > 0;
+          const hasImages = (Array.isArray(v.uploadedPrescriptions) && v.uploadedPrescriptions.length > 0) || Boolean(v.canvasPrescriptionUrl);
+          const hasDiagnosis = Boolean(v.diagnosisNotes && String(v.diagnosisNotes).trim().length > 0 && v.diagnosisNotes !== 'Clinical consultation & prescription recorded.');
+          const hasPayment = Number(v.paidAmount) > 0 || String(v.paymentStatus).toLowerCase() === 'paid';
+          const isCompleted = String(v.status || '').toLowerCase() === 'completed';
+
+          return hasMeds || hasImages || hasDiagnosis || hasPayment || isCompleted;
+        });
         allList.sort((a, b) => getSortWeight(b) - getSortWeight(a));
         setPatientVisits(allList);
       };
@@ -1920,6 +2217,11 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
           let normDate = parseToYMD(rawDate);
           if (!normDate || normDate.toLowerCase() === 'today') {
             normDate = todayYMD;
+          }
+
+          // Skip future appointments (e.g. tomorrow 30/10/2026) - they have not visited yet!
+          if (normDate && normDate > todayYMD) {
+            return;
           }
 
           const normBranch = String(data.branch || data.branchName || branchName || '').toLowerCase().replace(/\s*branch\s*/i, '').trim();
@@ -1988,7 +2290,7 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
             if (m) {
               const mName = m.name || m.medicineName || m.remedyName || (typeof m === 'string' ? m : null);
               if (mName && mName !== '[object Object]') {
-                medicineMap.set(mName, typeof m === 'object' ? m : { name: mName, dosage: '4 Pills', frequency: 'Twice Daily', duration: '7 Days', instructions: 'After food' });
+                medicineMap.set(mName, typeof m === 'object' ? m : { name: mName, dosage: '', frequency: '', duration: '', instructions: '' });
               }
             }
           });
@@ -2033,24 +2335,25 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
 
           const realDiagnosis = data.diagnosisNotes && data.diagnosisNotes !== 'Clinical consultation & prescription recorded.'
             ? data.diagnosisNotes
-            : (existing?.diagnosisNotes || data.notes || data.prescriptionNotes || data.chiefComplaints || data.complaints || data.subject || data.diseases || '');
+            : (existing?.diagnosisNotes || data.prescriptionNotes || '');
 
           storeMap.set(visitKey, {
             id: existing?.id || incomingApptId || docId || visitKey,
             appointmentId: existing?.appointmentId || incomingApptId || docId,
+            status: data.status || existing?.status || '',
             patientName: data.patientName || data.fullName || data.name || patientName,
             regId: data.registrationId || data.regId || data.regNo || regId,
             normalizedDate: normDate,
             normalizedBranch: normBranch || existing?.normalizedBranch,
             visitDate: displayDate,
-            visitTime: data.appointmentTime || data.time || existing?.visitTime || '10:00 AM',
+            visitTime: data.appointmentTime || data.time || existing?.visitTime || '',
             doctorName: docNameFormatted,
-            branch: targetBranch || 'Dilshuknagar Branch',
+            branch: targetBranch || branchName || '',
             consultationMode: data.consultationMode || existing?.consultationMode || 'In-Clinic',
             paidAmount: finalPaidAmount,
             totalAmount: computedTotal > 0 ? computedTotal : finalPaidAmount,
             paymentStatus: paymentStatus,
-            paymentMode: data.paymentMode || existing?.paymentMode || 'Cash',
+            paymentMode: data.paymentMode || existing?.paymentMode || '',
             subject: data.diseases || data.subject || existing?.subject || '',
             diseases: data.diseases || data.subject || existing?.diseases || '',
             diagnosisNotes: realDiagnosis,
@@ -2062,9 +2365,19 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
         }
       };
 
-      // 1. Process current patient appointment data immediately
+      // 1. Process current patient appointment data only if it already has completed consultation/prescription data
       if (patient) {
-        processDoc(patient, patient.id || 'current_patient');
+        const hasPastData = (Array.isArray(patient.items) && patient.items.length > 0) ||
+          (Array.isArray(patient.medicines) && patient.medicines.length > 0) ||
+          (Array.isArray(patient.uploadedPrescriptions) && patient.uploadedPrescriptions.length > 0) ||
+          Boolean(patient.canvasPrescriptionUrl) ||
+          (patient.diagnosisNotes && patient.diagnosisNotes !== 'Clinical consultation & prescription recorded.') ||
+          patient.status === 'completed' ||
+          String(patient.paymentStatus).toLowerCase() === 'paid' ||
+          Number(patient.paidAmount) > 0;
+        if (hasPastData) {
+          processDoc(patient, patient.id || 'current_patient');
+        }
       }
 
       // 2. Process records from memory receptionDataStore pool immediately (0ms instant display)
@@ -2245,6 +2558,67 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
               <Text style={styles.registerPkgBtnText}>+ Register Patient in Package</Text>
             </TouchableOpacity>
           </View>
+
+          {(patient?.isReback || patient?.rebackVisit || patient?.feeCollectionNeeded) && (
+            <View style={{
+              backgroundColor: '#eff6ff',
+              borderColor: '#93c5fd',
+              borderWidth: 1.5,
+              borderRadius: 12,
+              padding: 12,
+              marginTop: 10,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 8
+            }}>
+              <View style={{ flex: 1 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Ionicons name="time" size={16} color="#0284c7" />
+                  <Text style={{ fontSize: 12.5, fontWeight: '800', color: '#0369a1' }}>
+                    Reback Historical Visit
+                  </Text>
+                </View>
+                <Text style={{ fontSize: 11, color: '#475569', marginTop: 2 }}>
+                  📅 Visit Date: <Text style={{ fontWeight: '700' }}>{patient?.appointmentDate || patient?.date || 'Past Visit'}</Text>
+                  {patient?.doctorName ? ` • Dr. ${patient.doctorName}` : ''}
+                </Text>
+              </View>
+
+              <TouchableOpacity
+                onPress={() => {
+                  const pData = {
+                    ...patient,
+                    id: patient.appointmentId || patient.id,
+                    patientDocId: patient.patientDocId || patient.id,
+                    regId: patient.regId || regId,
+                    registrationId: patient.regId || regId,
+                    patientName: patient.patientName || patientName,
+                    phone: patient.phone || phone,
+                    phoneNumber: patient.phone || phone,
+                    branch: patient.branch || branchName,
+                    doctorName: patient.doctorName || doctorName,
+                    isReback: true,
+                    rebackVisit: true
+                  };
+                  setSelectedPatientForCollectFee(pData);
+                  setShowCollectFeeModal(true);
+                }}
+                style={{
+                  backgroundColor: '#16a34a',
+                  paddingHorizontal: 12,
+                  paddingVertical: 7,
+                  borderRadius: 8,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 5
+                }}
+              >
+                <Ionicons name="card" size={14} color="#ffffff" />
+                <Text style={{ color: '#ffffff', fontWeight: '800', fontSize: 11.5 }}>💳 Collect Fee</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
 
 
@@ -2591,7 +2965,7 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
                       >
                         <TouchableOpacity
                           activeOpacity={0.8}
-                          onPress={() => setFullPrescriptionPreview(img)}
+                          onPress={() => openPrescriptionPreview(img, uploadedImages)}
                           style={{ width: 80, height: 80 }}
                         >
                           <Image
@@ -2626,7 +3000,7 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
 
                         {/* Expand Icon */}
                         <TouchableOpacity
-                          onPress={() => setFullPrescriptionPreview(img)}
+                          onPress={() => openPrescriptionPreview(img, uploadedImages)}
                           style={{
                             position: 'absolute',
                             bottom: 3,
@@ -3021,16 +3395,226 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
 
         {/* 8. TAB 3: SHARE MEDIA */}
         {activeTab === 'media' && (
-          <View style={styles.card}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <Text style={styles.mainTabTitle}>Shared Media & Education</Text>
-              <TouchableOpacity style={styles.actionBtnSmall} onPress={() => setShowGlobalMediaModal(true)}>
-                <Text style={styles.actionBtnSmallText}>📁 Share Global Media</Text>
-              </TouchableOpacity>
+          <View style={[styles.card, { gap: 14 }]}>
+            {/* Header */}
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.mainTabTitle}>Shared Media & Educational Links</Text>
+                <Text style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
+                  Links shared here appear in the patient's app under Profile → My Media.
+                </Text>
+              </View>
+              <View style={{
+                paddingHorizontal: 8,
+                paddingVertical: 4,
+                borderRadius: 6,
+                backgroundColor: isPatientAppBooking ? '#dcfce7' : '#fef3c7',
+                borderWidth: 1,
+                borderColor: isPatientAppBooking ? '#bbf7d0' : '#fde68a'
+              }}>
+                <Text style={{ fontSize: 10, fontWeight: '800', color: isPatientAppBooking ? '#166534' : '#b45309' }}>
+                  {isPatientAppBooking ? '📱 Patient App' : `🏢 ${patient?.source || 'Reception'}`}
+                </Text>
+              </View>
             </View>
 
-            <View style={styles.dashedBox}>
-              <Text style={styles.dashedBoxText}>No global media has been shared with this patient yet.</Text>
+            {/* Conditional Lock Banner */}
+            {!isPatientAppBooking ? (
+              <View style={{
+                backgroundColor: '#fffbeb',
+                borderWidth: 1,
+                borderColor: '#fde68a',
+                borderRadius: 10,
+                padding: 12,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 10
+              }}>
+                <Feather name="lock" size={20} color="#b45309" />
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 12, fontWeight: '800', color: '#92400e' }}>
+                    Media Sharing to Patient App Disabled
+                  </Text>
+                  <Text style={{ fontSize: 11, color: '#b45309', marginTop: 2, lineHeight: 16 }}>
+                    This appointment was booked via {patient?.source || 'Reception / Web'}. Media sharing is only available for appointments booked through the Patient App.
+                  </Text>
+                </View>
+              </View>
+            ) : (
+              <View style={{
+                backgroundColor: '#f0fdf4',
+                borderWidth: 1,
+                borderColor: '#bbf7d0',
+                borderRadius: 10,
+                padding: 10,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 8
+              }}>
+                <Ionicons name="checkmark-circle" size={18} color="#16a34a" />
+                <Text style={{ fontSize: 11.5, color: '#15803d', fontWeight: '700', flex: 1 }}>
+                  Patient App Connected — You can share media links directly with this patient.
+                </Text>
+              </View>
+            )}
+
+            {/* SECTION 1: CURRENTLY SHARED MEDIA */}
+            <View style={{ backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 10, padding: 12 }}>
+              <Text style={{ fontSize: 12.5, fontWeight: '800', color: '#0f172a', marginBottom: 8 }}>
+                📤 Currently Shared with Patient ({sharedPatientMedia.length})
+              </Text>
+
+              {sharedPatientMedia.length === 0 ? (
+                <View style={{ padding: 16, alignItems: 'center' }}>
+                  <Text style={{ fontSize: 11.5, color: '#94a3b8' }}>No media links shared with this patient yet.</Text>
+                </View>
+              ) : (
+                <View style={{ gap: 8 }}>
+                  {sharedPatientMedia.map((m: any, idx: number) => (
+                    <View key={idx} style={{
+                      backgroundColor: '#ffffff',
+                      borderWidth: 1,
+                      borderColor: '#e2e8f0',
+                      borderRadius: 8,
+                      padding: 10,
+                      gap: 4
+                    }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Text style={{ fontSize: 12.5, fontWeight: '800', color: '#0f172a', flex: 1 }} numberOfLines={1}>
+                          {m.title || 'Educational Link'}
+                        </Text>
+                        <TouchableOpacity onPress={() => handleRevokeSharedMedia(m.url)} style={{ padding: 4 }}>
+                          <Feather name="trash-2" size={13} color="#ef4444" />
+                        </TouchableOpacity>
+                      </View>
+                      <Text style={{ fontSize: 10.5, color: '#0284c7' }} numberOfLines={1}>{m.url}</Text>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+                        <Text style={{ fontSize: 9.5, color: '#64748b' }}>
+                          Shared {m.sharedAt ? formatDDMMYYYY(m.sharedAt) : 'Today'}
+                        </Text>
+                        <TouchableOpacity
+                          onPress={() => Linking.openURL(m.url).catch(() => Alert.alert('Invalid URL', m.url))}
+                          style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#f1f5f9', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 5 }}
+                        >
+                          <Feather name="external-link" size={11} color="#0284c7" />
+                          <Text style={{ fontSize: 10.5, color: '#0284c7', fontWeight: '700' }}>Open</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </View>
+
+            {/* SECTION 2: CLINIC MEDIA REPOSITORY (FROM RECEPTION) */}
+            <View style={{ backgroundColor: '#ffffff', borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 10, padding: 12 }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <Text style={{ fontSize: 12.5, fontWeight: '800', color: '#0f172a' }}>
+                  📚 Reception Media Links ({clinicMediaItems.length})
+                </Text>
+              </View>
+
+              {/* Search input */}
+              <View style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                backgroundColor: '#f8fafc',
+                borderWidth: 1,
+                borderColor: '#e2e8f0',
+                borderRadius: 8,
+                paddingHorizontal: 8,
+                height: 34,
+                marginBottom: 10,
+                gap: 6
+              }}>
+                <Feather name="search" size={13} color="#94a3b8" />
+                <TextInput
+                  style={{ flex: 1, fontSize: 11.5, color: '#0f172a', paddingVertical: 0 }}
+                  placeholder="Filter media links..."
+                  placeholderTextColor="#94a3b8"
+                  value={mediaSearchQuery}
+                  onChangeText={setMediaSearchQuery}
+                />
+              </View>
+
+              {clinicMediaItems.length === 0 ? (
+                <View style={{ padding: 20, alignItems: 'center' }}>
+                  <Text style={{ fontSize: 11.5, color: '#94a3b8' }}>
+                    No media links saved by Reception in Media Manager yet.
+                  </Text>
+                </View>
+              ) : (
+                <View style={{ gap: 8 }}>
+                  {clinicMediaItems
+                    .filter((item: any) => {
+                      const q = mediaSearchQuery.toLowerCase().trim();
+                      if (!q) return true;
+                      return (
+                        item.title?.toLowerCase().includes(q) ||
+                        item.url?.toLowerCase().includes(q) ||
+                        item.folderName?.toLowerCase().includes(q)
+                      );
+                    })
+                    .map((item: any) => {
+                      const isAlreadyShared = sharedPatientMedia.some((m: any) => m.url === item.url);
+                      const isSharingThis = sharingMediaId === item.id;
+
+                      return (
+                        <View
+                          key={item.id}
+                          style={{
+                            backgroundColor: '#ffffff',
+                            borderWidth: 1,
+                            borderColor: isAlreadyShared ? '#86efac' : '#cbd5e1',
+                            borderRadius: 8,
+                            padding: 10,
+                            gap: 4
+                          }}
+                        >
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                            <Text style={{ fontSize: 12, fontWeight: '800', color: '#0f172a', flex: 1 }} numberOfLines={1}>
+                              {item.title}
+                            </Text>
+                            {item.folderName && (
+                              <Text style={{ fontSize: 9.5, color: '#64748b', backgroundColor: '#f1f5f9', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>
+                                📁 {item.folderName}
+                              </Text>
+                            )}
+                          </View>
+
+                          <Text style={{ fontSize: 10.5, color: '#0284c7' }} numberOfLines={1}>{item.url}</Text>
+
+                          <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', marginTop: 4 }}>
+                            {isAlreadyShared ? (
+                              <Text style={{ fontSize: 10.5, fontWeight: '800', color: '#16a34a' }}>
+                                ✓ Shared with Patient
+                              </Text>
+                            ) : (
+                              <TouchableOpacity
+                                disabled={!isPatientAppBooking || isSharingThis}
+                                onPress={() => handleShareMediaItem(item)}
+                                style={{
+                                  backgroundColor: !isPatientAppBooking ? '#e2e8f0' : '#0284c7',
+                                  paddingHorizontal: 10,
+                                  paddingVertical: 5,
+                                  borderRadius: 6
+                                }}
+                              >
+                                <Text style={{
+                                  fontSize: 10.5,
+                                  fontWeight: '800',
+                                  color: !isPatientAppBooking ? '#94a3b8' : '#ffffff'
+                                }}>
+                                  {isSharingThis ? 'Sharing...' : !isPatientAppBooking ? '🔒 Disabled' : '+ Share to Patient App'}
+                                </Text>
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                        </View>
+                      );
+                    })}
+                </View>
+              )}
             </View>
           </View>
         )}
@@ -3061,852 +3645,1238 @@ export const PatientFileMobileScreen: React.FC<PatientFileMobileScreenProps> = (
           </View>
         )}
 
-        {/* MEDICAL HISTORY CARD (MOVED TO BOTTOM) */}
-        <View style={styles.historyCard}>
+        {/* PATIENT HISTORY & RECORDS (ALL HISTORY, PRESCRIPTIONS & PAYMENT HISTORY) */}
+        <View style={[styles.historyCard, { backgroundColor: '#ffffff', borderColor: '#bae6fd', borderWidth: 1 }]}>
+          {/* Header */}
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <Text style={styles.historyHeaderTitle}>⏱ Medical History ({patientVisits.length})</Text>
-            <View style={{ backgroundColor: '#e0f2fe', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
-              <Text style={{ fontSize: 10, color: '#0369a1', fontWeight: '800' }}>Tap for Prescription</Text>
+            <View>
+              <Text style={styles.historyHeaderTitle}>📋 Patient History & Records</Text>
+              <Text style={{ fontSize: 11, color: '#64748b', marginTop: 1 }}>
+                Total Paid: <Text style={{ color: '#16a34a', fontWeight: '800' }}>₹{totalPaidSum.toLocaleString('en-IN')}</Text> ({patientVisits.length} Visits)
+              </Text>
             </View>
           </View>
 
+          {/* 3-Tab Segmented Bar: All History | Prescriptions | Payment History */}
+          <View style={{ flexDirection: 'row', backgroundColor: '#f1f5f9', borderRadius: 10, padding: 3, marginBottom: 12, gap: 4 }}>
+            {[
+              { key: 'all', label: `All (${patientVisits.length})` },
+              { key: 'prescriptions', label: allVisitedPrescriptionImages.length > 0 ? `Prescriptions (${allVisitedPrescriptionImages.length})` : 'Prescriptions' },
+              { key: 'billing', label: totalPaidSum > 0 ? `Payments (₹${totalPaidSum.toLocaleString('en-IN')})` : 'Payments' },
+            ].map((tab) => {
+              const isActive = historyFilterTab === tab.key;
+              return (
+                <TouchableOpacity
+                  key={tab.key}
+                  onPress={() => setHistoryFilterTab(tab.key as any)}
+                  style={{
+                    flex: 1,
+                    paddingVertical: 7,
+                    borderRadius: 8,
+                    backgroundColor: isActive ? '#ffffff' : 'transparent',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    shadowColor: isActive ? '#000' : 'transparent',
+                    shadowOffset: { width: 0, height: 1 },
+                    shadowOpacity: isActive ? 0.08 : 0,
+                    shadowRadius: 2,
+                    elevation: isActive ? 1 : 0
+                  }}
+                >
+                  <Text style={{ fontSize: 10.5, fontWeight: isActive ? '800' : '600', color: isActive ? '#0284c7' : '#64748b' }} numberOfLines={1}>
+                    {tab.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {/* CONTENT */}
           {patientVisits.length === 0 ? (
             <View style={styles.historyEmptyBox}>
               <Ionicons name="create-outline" size={24} color="#94a3b8" />
               <Text style={styles.historyEmptyText}>No previous visits recorded for this patient.</Text>
             </View>
           ) : (
-            <View style={{ gap: 8 }}>
-              {patientVisits.slice(0, 2).map((visit, idx) => (
-                <TouchableOpacity
-                  key={visit.id ? `${visit.id}-${idx}` : `visit-${idx}`}
-                  activeOpacity={0.7}
-                  style={{
-                    backgroundColor: '#ffffff',
-                    borderRadius: 12,
-                    borderWidth: 1,
-                    borderColor: '#cbd5e1',
-                    padding: 10,
-                    gap: 4,
-                    shadowColor: '#0f172a',
-                    shadowOffset: { width: 0, height: 1 },
-                    shadowOpacity: 0.05,
-                    shadowRadius: 3,
-                    elevation: 1
-                  }}
-                  onPress={() => setSelectedVisitModal(visit)}
-                >
-                  {/* Outer Card: STRICTLY Date & Branch */}
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <View style={{ backgroundColor: '#f1f5f9', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 }}>
-                      <Text style={{ fontSize: 12, fontWeight: '800', color: '#0f172a' }}>
-                        📅 {renderSafeString(visit.visitDate, 'Today')}
-                      </Text>
-                    </View>
-                    <Text style={{ fontSize: 12, fontWeight: '700', color: '#0369a1' }}>
-                      📍 {renderSafeString(visit.branch, 'Dilshuknagar Branch')}
-                    </Text>
+            <View style={{ gap: 10 }}>
+              {/* 1. PRESCRIPTIONS TAB VIEW */}
+              {historyFilterTab === 'prescriptions' && (
+                allVisitedPrescriptionImages.length === 0 ? (
+                  <View style={{ padding: 20, alignItems: 'center' }}>
+                    <Text style={{ fontSize: 12, color: '#94a3b8' }}>No prescription images found for this patient.</Text>
                   </View>
-
-                  {/* View Details Action Indicator */}
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 4, paddingTop: 6, borderTopWidth: 1, borderTopColor: '#f1f5f9' }}>
-                    <Text style={{ fontSize: 10.5, color: '#0284c7', fontWeight: '700' }}>
-                      View Full Prescription & Info ➔
-                    </Text>
+                ) : (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                    {allVisitedPrescriptionImages.map((img: any, idx: number) => (
+                      <TouchableOpacity
+                        key={idx}
+                        activeOpacity={0.8}
+                        onPress={() => openPrescriptionPreview(img.uri, allVisitedPrescriptionImages.map((i: any) => i.uri))}
+                        style={{
+                          width: '48%',
+                          backgroundColor: '#ffffff',
+                          borderRadius: 10,
+                          borderWidth: 1,
+                          borderColor: '#cbd5e1',
+                          overflow: 'hidden'
+                        }}
+                      >
+                        <View style={{ paddingHorizontal: 6, paddingVertical: 4, backgroundColor: '#e0f2fe', flexDirection: 'row', justifyContent: 'space-between' }}>
+                          <Text style={{ fontSize: 9.5, fontWeight: '800', color: '#0369a1' }}>Visit #{img.visitNumber}</Text>
+                          <Text style={{ fontSize: 9.5, color: '#0369a1' }}>{img.visitDate}</Text>
+                        </View>
+                        <View style={{ height: 100, backgroundColor: '#0f172a', alignItems: 'center', justifyContent: 'center' }}>
+                          <Image source={{ uri: img.uri }} style={{ width: '100%', height: '100%' }} resizeMode="contain" />
+                        </View>
+                        <View style={{ paddingVertical: 4, alignItems: 'center', backgroundColor: '#ffffff' }}>
+                          <Text style={{ fontSize: 10, fontWeight: '700', color: '#0284c7' }}>Tap to View 🔍</Text>
+                        </View>
+                      </TouchableOpacity>
+                    ))}
                   </View>
-                </TouchableOpacity>
-              ))}
-
-              {patientVisits.length > 2 && (
-                <TouchableOpacity
-                  activeOpacity={0.8}
-                  onPress={() => setShowAllVisitsModal(true)}
-                  style={{
-                    backgroundColor: '#f0f9ff',
-                    borderWidth: 1.5,
-                    borderColor: '#0284c7',
-                    borderStyle: 'dashed',
-                    paddingVertical: 10,
-                    borderRadius: 10,
-                    alignItems: 'center',
-                    marginTop: 4
-                  }}
-                >
-                  <Text style={{ fontSize: 12, fontWeight: '800', color: '#0284c7' }}>
-                    ⏱ View All {patientVisits.length} Past Visits in Popup ➔
-                  </Text>
-                </TouchableOpacity>
+                )
               )}
+
+              {/* 2. ALL HISTORY & PAYMENT HISTORY TAB VIEWS */}
+              {historyFilterTab !== 'prescriptions' && patientVisits.map((visit: any, vIdx: number) => {
+                const visitNum = patientVisits.length - vIdx;
+                const isPaid = visit.paymentStatus === 'paid' || Number(visit.paidAmount) > 0;
+                const showPayment = historyFilterTab === 'all' || historyFilterTab === 'billing';
+                const showPrescription = historyFilterTab === 'all';
+                const visitImgs = Array.from(new Set([
+                  ...(visit.canvasPrescriptionUrl ? [visit.canvasPrescriptionUrl] : []),
+                  ...(visit.uploadedPrescriptions || [])
+                ].filter(Boolean)));
+
+                return (
+                  <View
+                    key={visit.id || vIdx}
+                    style={{
+                      backgroundColor: '#ffffff',
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: '#cbd5e1',
+                      padding: 10,
+                      gap: 6
+                    }}
+                  >
+                    {/* Header: Visit #, Date, Paid Badge */}
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <View style={{ backgroundColor: '#e0f2fe', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>
+                          <Text style={{ fontSize: 10, fontWeight: '800', color: '#0284c7' }}>VISIT #{visitNum}</Text>
+                        </View>
+                        <Text style={{ fontSize: 12, fontWeight: '800', color: '#0f172a' }}>📅 {renderSafeString(visit.visitDate, 'Today')}</Text>
+                        <Text style={{ fontSize: 11, color: '#64748b' }}>• {visit.visitTime}</Text>
+                      </View>
+                      <View style={{
+                        paddingHorizontal: 6,
+                        paddingVertical: 2,
+                        borderRadius: 6,
+                        backgroundColor: isPaid ? '#dcfce7' : '#fef3c7',
+                        borderWidth: 1,
+                        borderColor: isPaid ? '#bbf7d0' : '#fde68a'
+                      }}>
+                        <Text style={{ fontSize: 10, fontWeight: '800', color: isPaid ? '#15803d' : '#b45309' }}>
+                          {isPaid ? `₹${visit.paidAmount} Paid ✓` : 'Fee Pending'}
+                        </Text>
+                      </View>
+                    </View>
+
+                    {/* Doctor & Branch */}
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Text style={{ fontSize: 11, color: '#64748b' }}>🩺 {visit.doctorName}</Text>
+                      <Text style={{ fontSize: 11, color: '#64748b' }}>📍 {visit.branch}</Text>
+                    </View>
+
+                    {/* Payment Row */}
+                    {showPayment && (
+                      <View style={{
+                        backgroundColor: '#f8fafc',
+                        borderWidth: 1,
+                        borderColor: '#e2e8f0',
+                        borderRadius: 8,
+                        padding: 8,
+                        flexDirection: 'row',
+                        justifyContent: 'space-between',
+                        alignItems: 'center'
+                      }}>
+                        <View>
+                          <Text style={{ fontSize: 9.5, color: '#64748b', fontWeight: '700' }}>AMOUNT PAID</Text>
+                          <Text style={{ fontSize: 13, fontWeight: '900', color: isPaid ? '#15803d' : '#b45309' }}>₹{visit.paidAmount || 0}</Text>
+                        </View>
+                        <View style={{ alignItems: 'flex-end' }}>
+                          <Text style={{ fontSize: 9.5, color: '#64748b', fontWeight: '700' }}>PAYMENT MODE</Text>
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: '#0f172a' }}>💳 {visit.paymentMode || 'Cash'}</Text>
+                        </View>
+                      </View>
+                    )}
+
+                    {/* Prescriptions & Remedies with Edit Rx Button */}
+                    {showPrescription && (
+                      <View style={{
+                        backgroundColor: '#f0f9ff',
+                        borderWidth: 1,
+                        borderColor: '#bae6fd',
+                        borderRadius: 8,
+                        padding: 8,
+                        gap: 6
+                      }}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <Text style={{ fontSize: 11, fontWeight: '800', color: '#0284c7' }}>
+                            💊 Prescriptions & Remedies ({visit.medicines?.length || 0})
+                          </Text>
+                          <TouchableOpacity
+                            onPress={() => setSelectedVisitModal(visit)}
+                            style={{
+                              backgroundColor: '#ffffff',
+                              borderWidth: 1,
+                              borderColor: '#0284c7',
+                              paddingHorizontal: 8,
+                              paddingVertical: 3,
+                              borderRadius: 6,
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              gap: 2
+                            }}
+                          >
+                            <MaterialCommunityIcons name="pencil-outline" size={12} color="#0284c7" />
+                            <Text style={{ fontSize: 10, fontWeight: '800', color: '#0284c7' }}>Edit Rx</Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        {/* Complaints & Diagnosis Notes */}
+                        {(visit.subject || visit.diagnosisNotes) ? (
+                          <View style={{ backgroundColor: '#ffffff', borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 6, padding: 6, gap: 2 }}>
+                            {visit.subject ? <Text style={{ fontSize: 10.5, color: '#334155' }}><Text style={{ fontWeight: '800' }}>Complaints: </Text>{visit.subject}</Text> : null}
+                            {visit.diagnosisNotes ? <Text style={{ fontSize: 10.5, color: '#334155' }}><Text style={{ fontWeight: '800' }}>Diagnosis: </Text>{visit.diagnosisNotes}</Text> : null}
+                          </View>
+                        ) : null}
+
+                        {/* Medicines List */}
+                        {visit.medicines && visit.medicines.length > 0 ? (
+                          <View style={{ gap: 4 }}>
+                            {visit.medicines.map((med: any, mIdx: number) => {
+                              const details = [med.dosage, med.frequency, med.duration].filter(Boolean).join(' • ');
+                              return (
+                                <View key={mIdx} style={{ backgroundColor: '#ffffff', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <Text style={{ fontSize: 10.5, fontWeight: '800', color: '#0f172a' }}>{mIdx + 1}. {med.name}</Text>
+                                  {details ? (
+                                    <Text style={{ fontSize: 10, color: '#0284c7', fontWeight: '700' }}>{details}</Text>
+                                  ) : null}
+                                </View>
+                              );
+                            })}
+                          </View>
+                        ) : null}
+
+                        {/* Thumbnails */}
+                        {visitImgs.length > 0 && (
+                          <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center', marginTop: 2 }}>
+                            <Text style={{ fontSize: 10, color: '#64748b', fontWeight: '700' }}>Scans:</Text>
+                            {visitImgs.map((imgUri: any, iIdx: number) => (
+                              <TouchableOpacity
+                                key={iIdx}
+                                onPress={() => openPrescriptionPreview(imgUri, visitImgs)}
+                                style={{ width: 30, height: 30, borderRadius: 4, overflow: 'hidden', borderWidth: 1, borderColor: '#cbd5e1' }}
+                              >
+                                <Image source={{ uri: imgUri }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        )}
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
             </View>
           )}
         </View>
+
 
         {/* Generous bottom spacing ensuring full scrollability past the bottom navigation bar */}
         <View style={{ height: 80 }} />
 
 
         {/* VISIT DETAILS & PRESCRIPTION POPUP MODAL FOR MOBILE */}
-        <Modal
-          visible={!!selectedVisitModal}
-          transparent={true}
-          animationType="none"
-          onRequestClose={() => setSelectedVisitModal(null)}
-        >
-          <TouchableOpacity
-            style={styles.modalOverlay}
-            activeOpacity={1}
-            onPress={() => setSelectedVisitModal(null)}
+        {!!selectedVisitModal && (
+          <Modal
+            visible={!!selectedVisitModal}
+            transparent={true}
+            animationType="none"
+            onRequestClose={() => setSelectedVisitModal(null)}
           >
             <TouchableOpacity
+              style={styles.modalOverlay}
               activeOpacity={1}
-              style={[styles.modalCard, { maxWidth: 400, paddingVertical: 20 }]}
-              onPress={() => { }}
+              onPress={() => setSelectedVisitModal(null)}
             >
-              {/* Header */}
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, width: '100%' }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: '#e0f2fe', alignItems: 'center', justifyContent: 'center' }}>
-                    <Ionicons name="document-text" size={20} color="#0284c7" />
+              <TouchableOpacity
+                activeOpacity={1}
+                style={[styles.modalCard, { maxWidth: 400, paddingVertical: 20 }]}
+                onPress={() => { }}
+              >
+                {/* Header */}
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, width: '100%' }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: '#e0f2fe', alignItems: 'center', justifyContent: 'center' }}>
+                      <Ionicons name="document-text" size={20} color="#0284c7" />
+                    </View>
+                    <View>
+                      <Text style={{ fontSize: 16, fontWeight: '800', color: '#0f172a' }}>Visit Details</Text>
+                      <Text style={{ fontSize: 11, color: '#64748b' }}>📅 {renderSafeString(selectedVisitModal?.visitDate, 'Today')}{selectedVisitModal?.visitTime ? ` @ ${selectedVisitModal.visitTime}` : ''}</Text>
+                    </View>
                   </View>
-                  <View>
-                    <Text style={{ fontSize: 16, fontWeight: '800', color: '#0f172a' }}>Visit Details</Text>
-                    <Text style={{ fontSize: 11, color: '#64748b' }}>📅 {renderSafeString(selectedVisitModal?.visitDate, 'Today')} @ {renderSafeString(selectedVisitModal?.visitTime, '10:00 AM')}</Text>
-                  </View>
+                  <TouchableOpacity onPress={() => setSelectedVisitModal(null)} style={{ padding: 4 }}>
+                    <Ionicons name="close" size={22} color="#64748b" />
+                  </TouchableOpacity>
                 </View>
-                <TouchableOpacity onPress={() => setSelectedVisitModal(null)} style={{ padding: 4 }}>
-                  <Ionicons name="close" size={22} color="#64748b" />
-                </TouchableOpacity>
-              </View>
 
-              {/* Visit Details Card */}
-              <View style={{ width: '100%', backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 12, padding: 12, gap: 8, marginBottom: 14 }}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Text style={{ fontSize: 11.5, color: '#64748b', fontWeight: '600' }}>Patient</Text>
-                  <Text style={{ fontSize: 12.5, color: '#0f172a', fontWeight: '800' }}>
-                    {renderSafeString(selectedVisitModal?.patientName || patientName, '')} {selectedVisitModal?.regId || regId ? `(${selectedVisitModal?.regId || regId})` : ''}
-                  </Text>
+                {/* Visit Details Card */}
+                <View style={{ width: '100%', backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 12, padding: 12, gap: 8, marginBottom: 14 }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Text style={{ fontSize: 11.5, color: '#64748b', fontWeight: '600' }}>Patient</Text>
+                    <Text style={{ fontSize: 12.5, color: '#0f172a', fontWeight: '800' }}>
+                      {renderSafeString(selectedVisitModal?.patientName || patientName, '')} {selectedVisitModal?.regId || regId ? `(${selectedVisitModal?.regId || regId})` : ''}
+                    </Text>
+                  </View>
+                  <View style={{ height: 1, backgroundColor: '#f1f5f9' }} />
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Text style={{ fontSize: 11.5, color: '#64748b', fontWeight: '600' }}>Doctor</Text>
+                    <Text style={{ fontSize: 12.5, color: '#0284c7', fontWeight: '800' }}>
+                      {renderSafeString(formatDoctorName(selectedVisitModal?.doctorName, selectedVisitModal?.branch), 'Resident Doctor')}
+                    </Text>
+                  </View>
+                  <View style={{ height: 1, backgroundColor: '#f1f5f9' }} />
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Text style={{ fontSize: 11.5, color: '#64748b', fontWeight: '600' }}>Branch & Mode</Text>
+                    <Text style={{ fontSize: 12.5, color: '#0f172a', fontWeight: '800' }}>
+                      {renderSafeString(selectedVisitModal?.branch, '') ? `${selectedVisitModal.branch} • ` : ''}{renderSafeString(selectedVisitModal?.consultationMode, 'In-Clinic')}
+                    </Text>
+                  </View>
+                  <View style={{ height: 1, backgroundColor: '#f1f5f9' }} />
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Text style={{ fontSize: 11.5, color: '#64748b', fontWeight: '600' }}>Amount Paid</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <View style={{
+                        backgroundColor: selectedVisitModal?.paymentStatus === 'paid' || Number(selectedVisitModal?.paidAmount) > 0 ? '#dcfce7' : '#fef3c7',
+                        paddingHorizontal: 8,
+                        paddingVertical: 2,
+                        borderRadius: 6
+                      }}>
+                        <Text style={{
+                          fontSize: 12,
+                          fontWeight: '800',
+                          color: selectedVisitModal?.paymentStatus === 'paid' || Number(selectedVisitModal?.paidAmount) > 0 ? '#15803d' : '#b45309'
+                        }}>
+                          {selectedVisitModal?.paymentStatus === 'paid' || Number(selectedVisitModal?.paidAmount) > 0
+                            ? `₹${selectedVisitModal?.paidAmount || '0'} Paid ✓`
+                            : `Payment Pending (₹${selectedVisitModal?.totalAmount || '0'})`}
+                        </Text>
+                      </View>
+                      {!(selectedVisitModal?.paymentStatus === 'paid' || Number(selectedVisitModal?.paidAmount) > 0) && (
+                        <TouchableOpacity
+                          onPress={() => {
+                            const pData = {
+                              ...selectedVisitModal,
+                              id: selectedVisitModal.appointmentId || selectedVisitModal.id,
+                              patientDocId: selectedVisitModal.patientDocId || patient?.id,
+                              regId: selectedVisitModal.regId || regId,
+                              registrationId: selectedVisitModal.regId || regId,
+                              patientName: selectedVisitModal.patientName || patientName,
+                              phone: selectedVisitModal.phone || phone,
+                              phoneNumber: selectedVisitModal.phone || phone,
+                              branch: selectedVisitModal.branch || branchName,
+                              doctorName: selectedVisitModal.doctorName || doctorName,
+                              isReback: selectedVisitModal.isReback === true,
+                              rebackVisit: selectedVisitModal.rebackVisit === true
+                            };
+                            setSelectedVisitModal(null);
+                            setSelectedPatientForCollectFee(pData);
+                            setShowCollectFeeModal(true);
+                          }}
+                          style={{
+                            backgroundColor: '#16a34a',
+                            paddingHorizontal: 8,
+                            paddingVertical: 3,
+                            borderRadius: 6
+                          }}
+                        >
+                          <Text style={{ color: '#ffffff', fontWeight: '800', fontSize: 11 }}>💳 Collect Fee</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  </View>
                 </View>
-                <View style={{ height: 1, backgroundColor: '#f1f5f9' }} />
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Text style={{ fontSize: 11.5, color: '#64748b', fontWeight: '600' }}>Doctor</Text>
-                  <Text style={{ fontSize: 12.5, color: '#0284c7', fontWeight: '800' }}>
-                    {renderSafeString(formatDoctorName(selectedVisitModal?.doctorName, selectedVisitModal?.branch), 'Resident Doctor')}
-                  </Text>
-                </View>
-                <View style={{ height: 1, backgroundColor: '#f1f5f9' }} />
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Text style={{ fontSize: 11.5, color: '#64748b', fontWeight: '600' }}>Branch & Mode</Text>
-                  <Text style={{ fontSize: 12.5, color: '#0f172a', fontWeight: '800' }}>
-                    {renderSafeString(selectedVisitModal?.branch, 'Dilshuknagar Branch')} • {renderSafeString(selectedVisitModal?.consultationMode, 'In-Clinic')}
-                  </Text>
-                </View>
-                <View style={{ height: 1, backgroundColor: '#f1f5f9' }} />
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Text style={{ fontSize: 11.5, color: '#64748b', fontWeight: '600' }}>Amount Paid</Text>
-                  <View style={{
-                    backgroundColor: selectedVisitModal?.paymentStatus === 'paid' || Number(selectedVisitModal?.paidAmount) > 0 ? '#dcfce7' : '#fef3c7',
-                    paddingHorizontal: 8,
-                    paddingVertical: 2,
-                    borderRadius: 6
-                  }}>
-                    <Text style={{
-                      fontSize: 12,
-                      fontWeight: '800',
-                      color: selectedVisitModal?.paymentStatus === 'paid' || Number(selectedVisitModal?.paidAmount) > 0 ? '#15803d' : '#b45309'
-                    }}>
-                      {selectedVisitModal?.paymentStatus === 'paid' || Number(selectedVisitModal?.paidAmount) > 0
-                        ? `₹${selectedVisitModal?.paidAmount || '0'} Paid ✓`
-                        : `Payment Pending (₹${selectedVisitModal?.totalAmount || '0'})`}
+
+                {/* Diagnosis Notes */}
+                <View style={{ width: '100%', marginBottom: 14 }}>
+                  <Text style={{ fontSize: 11.5, fontWeight: '800', color: '#334155', marginBottom: 4 }}>📋 Diagnosis & Clinical Notes</Text>
+                  <View style={{ backgroundColor: '#ffffff', borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 10, padding: 10 }}>
+                    <Text style={{ fontSize: 12, color: '#1e293b', lineHeight: 18 }}>
+                      {renderSafeString(selectedVisitModal?.diagnosisNotes || selectedVisitModal?.subject, 'No diagnosis notes entered for this visit.')}
                     </Text>
                   </View>
                 </View>
-              </View>
 
-              {/* Diagnosis Notes */}
-              <View style={{ width: '100%', marginBottom: 14 }}>
-                <Text style={{ fontSize: 11.5, fontWeight: '800', color: '#334155', marginBottom: 4 }}>📋 Diagnosis & Clinical Notes</Text>
-                <View style={{ backgroundColor: '#ffffff', borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 10, padding: 10 }}>
-                  <Text style={{ fontSize: 12, color: '#1e293b', lineHeight: 18 }}>
-                    {renderSafeString(selectedVisitModal?.diagnosisNotes || selectedVisitModal?.subject, 'No diagnosis notes entered for this visit.')}
-                  </Text>
-                </View>
-              </View>
-
-              {/* Prescribed Medicines Section */}
-              {selectedVisitModal?.medicines && selectedVisitModal.medicines.length > 0 && (
-                <View style={{ width: '100%', marginBottom: 14 }}>
-                  <Text style={{ fontSize: 11.5, fontWeight: '800', color: '#0284c7', marginBottom: 6 }}>
-                    💊 Prescribed Medicines ({selectedVisitModal.medicines.length})
-                  </Text>
-                  <View style={{ gap: 6 }}>
-                    {selectedVisitModal.medicines.map((med: any, idx: number) => (
-                      <View
-                        key={idx}
-                        style={{
-                          backgroundColor: '#f8fafc',
-                          borderWidth: 1,
-                          borderColor: '#cbd5e1',
-                          borderRadius: 8,
-                          padding: 8,
-                          gap: 2
-                        }}
-                      >
-                        <Text style={{ fontSize: 12, fontWeight: '800', color: '#0f172a' }}>
-                          {med.name || med.medicineName || 'Remedy'}
-                        </Text>
-                        <Text style={{ fontSize: 11, color: '#0284c7', fontWeight: '700' }}>
-                          {med.dosage || '4 Pills'} • {med.frequency || 'Twice Daily'} ({med.duration || '7 Days'})
-                        </Text>
-                        {!!med.instructions && (
-                          <Text style={{ fontSize: 10, color: '#64748b', fontStyle: 'italic' }}>
-                            Note: {med.instructions}
+                {/* Prescribed Medicines Section */}
+                {selectedVisitModal?.medicines && selectedVisitModal.medicines.length > 0 && (
+                  <View style={{ width: '100%', marginBottom: 14 }}>
+                    <Text style={{ fontSize: 11.5, fontWeight: '800', color: '#0284c7', marginBottom: 6 }}>
+                      💊 Prescribed Medicines ({selectedVisitModal.medicines.length})
+                    </Text>
+                    <View style={{ gap: 6 }}>
+                      {selectedVisitModal.medicines.map((med: any, idx: number) => (
+                        <View
+                          key={idx}
+                          style={{
+                            backgroundColor: '#f8fafc',
+                            borderWidth: 1,
+                            borderColor: '#cbd5e1',
+                            borderRadius: 8,
+                            padding: 8,
+                            gap: 2
+                          }}
+                        >
+                          <Text style={{ fontSize: 12, fontWeight: '800', color: '#0f172a' }}>
+                            {med.name || med.medicineName || 'Remedy'}
                           </Text>
-                        )}
-                      </View>
-                    ))}
-                  </View>
-                </View>
-              )}
-
-              {/* Uploaded & Canvas Prescription Scans */}
-              <View style={{ width: '100%', marginBottom: 16 }}>
-                <Text style={{ fontSize: 11.5, fontWeight: '800', color: '#0284c7', marginBottom: 6 }}>
-                  📄 Uploaded Prescription Scans & Canvas Document
-                </Text>
-                {(() => {
-                  const images = Array.from(new Set([
-                    ...(selectedVisitModal?.canvasPrescriptionUrl ? [selectedVisitModal.canvasPrescriptionUrl] : []),
-                    ...(selectedVisitModal?.uploadedPrescriptions || []),
-                    ...(selectedVisitModal?.prescriptionUrls || []),
-                    ...(selectedVisitModal?.prescriptionUrl ? [selectedVisitModal.prescriptionUrl] : []),
-                    ...(selectedVisitModal?.prescriptionImage ? [selectedVisitModal.prescriptionImage] : [])
-                  ].filter(Boolean)));
-
-                  if (images.length === 0) {
-                    return (
-                      <View style={{ backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#cbd5e1', borderStyle: 'dashed', borderRadius: 10, padding: 12, alignItems: 'center' }}>
-                        <Text style={{ fontSize: 11, color: '#64748b' }}>No digital prescription scans uploaded for this visit.</Text>
-                      </View>
-                    );
-                  }
-
-                  return (
-                    <View style={{ flexDirection: 'row', gap: 10, flexWrap: 'wrap' }}>
-                      {images.filter(Boolean).map((url: string, idx: number) => (
-                        url ? (
-                          <TouchableOpacity
-                            key={idx}
-                            onPress={() => setFullPrescriptionPreview(url)}
-                            style={{ width: 100, height: 120, borderRadius: 10, overflow: 'hidden', borderWidth: 2, borderColor: '#0284c7' }}
-                          >
-                            <Image
-                              source={{ uri: url }}
-                              style={{ width: 100, height: 120, minWidth: 100, minHeight: 120 }}
-                              resizeMode="cover"
-                            />
-                            <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(15, 23, 42, 0.82)', paddingVertical: 3 }}>
-                              <Text style={{ fontSize: 9.5, color: '#ffffff', fontWeight: '800', textAlign: 'center' }}>Tap to View</Text>
-                            </View>
-                          </TouchableOpacity>
-                        ) : null
+                          {(() => {
+                            const parts = [med.dosage, med.frequency, med.duration].filter(Boolean);
+                            return parts.length > 0 ? (
+                              <Text style={{ fontSize: 11, color: '#0284c7', fontWeight: '700' }}>
+                                {parts.join(' • ')}
+                              </Text>
+                            ) : null;
+                          })()}
+                          {!!med.instructions && (
+                            <Text style={{ fontSize: 10, color: '#64748b', fontStyle: 'italic' }}>
+                              Note: {med.instructions}
+                            </Text>
+                          )}
+                        </View>
                       ))}
                     </View>
-                  );
-                })()}
-              </View>
+                  </View>
+                )}
 
-              {/* Close Button */}
-              <TouchableOpacity
-                style={{ width: '100%', backgroundColor: '#0284c7', borderRadius: 10, paddingVertical: 12, alignItems: 'center' }}
-                onPress={() => setSelectedVisitModal(null)}
-              >
-                <Text style={{ color: '#ffffff', fontWeight: '800', fontSize: 13 }}>Close</Text>
+                {/* Uploaded & Canvas Prescription Scans */}
+                <View style={{ width: '100%', marginBottom: 16 }}>
+                  <Text style={{ fontSize: 11.5, fontWeight: '800', color: '#0284c7', marginBottom: 6 }}>
+                    📄 Uploaded Prescription Scans & Canvas Document
+                  </Text>
+                  {(() => {
+                    const images = Array.from(new Set([
+                      ...(selectedVisitModal?.canvasPrescriptionUrl ? [selectedVisitModal.canvasPrescriptionUrl] : []),
+                      ...(selectedVisitModal?.uploadedPrescriptions || []),
+                      ...(selectedVisitModal?.prescriptionUrls || []),
+                      ...(selectedVisitModal?.prescriptionUrl ? [selectedVisitModal.prescriptionUrl] : []),
+                      ...(selectedVisitModal?.prescriptionImage ? [selectedVisitModal.prescriptionImage] : [])
+                    ].filter(Boolean)));
+
+                    if (images.length === 0) {
+                      return (
+                        <View style={{ backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#cbd5e1', borderStyle: 'dashed', borderRadius: 10, padding: 12, alignItems: 'center' }}>
+                          <Text style={{ fontSize: 11, color: '#64748b' }}>No digital prescription scans uploaded for this visit.</Text>
+                        </View>
+                      );
+                    }
+
+                    return (
+                      <View style={{ flexDirection: 'row', gap: 10, flexWrap: 'wrap' }}>
+                        {images.filter(Boolean).map((url: string, idx: number) => (
+                          url ? (
+                            <TouchableOpacity
+                              key={idx}
+                              onPress={() => openPrescriptionPreview(url, images.filter(Boolean))}
+                              style={{ width: 100, height: 120, borderRadius: 10, overflow: 'hidden', borderWidth: 2, borderColor: '#0284c7' }}
+                            >
+                              <Image
+                                source={{ uri: url }}
+                                style={{ width: 100, height: 120, minWidth: 100, minHeight: 120 }}
+                                resizeMode="cover"
+                              />
+                              <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(15, 23, 42, 0.82)', paddingVertical: 3 }}>
+                                <Text style={{ fontSize: 9.5, color: '#ffffff', fontWeight: '800', textAlign: 'center' }}>Tap to View</Text>
+                              </View>
+                            </TouchableOpacity>
+                          ) : null
+                        ))}
+                      </View>
+                    );
+                  })()}
+                </View>
+
+                {/* Close Button */}
+                <TouchableOpacity
+                  style={{ width: '100%', backgroundColor: '#0284c7', borderRadius: 10, paddingVertical: 12, alignItems: 'center' }}
+                  onPress={() => setSelectedVisitModal(null)}
+                >
+                  <Text style={{ color: '#ffffff', fontWeight: '800', fontSize: 13 }}>Close</Text>
+                </TouchableOpacity>
               </TouchableOpacity>
             </TouchableOpacity>
-          </TouchableOpacity>
-        </Modal>
+          </Modal>
+        )}
 
         {/* ALL PAST VISITS FULL POPUP MODAL FOR MOBILE */}
-        <Modal
-          visible={showAllVisitsModal}
-          transparent={true}
-          animationType="slide"
-          onRequestClose={() => setShowAllVisitsModal(false)}
-        >
-          <View style={styles.modalOverlay}>
-            <View style={[styles.modalCard, { maxHeight: '88%', padding: 16, width: '94%', maxWidth: 450 }]}>
-              {/* Header */}
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontSize: 15, fontWeight: '800', color: '#0284c7' }}>
-                    ⏱ Medical History ({patientVisits.length} Visits)
-                  </Text>
-                  <Text style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
-                    {patientName} • {regId}
-                  </Text>
+        {showAllVisitsModal && (
+          <Modal
+            visible={showAllVisitsModal}
+            transparent={true}
+            animationType="slide"
+            onRequestClose={() => setShowAllVisitsModal(false)}
+          >
+            <View style={styles.modalOverlay}>
+              <View style={[styles.modalCard, { maxHeight: '88%', padding: 16, width: '94%', maxWidth: 450 }]}>
+                {/* Header */}
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 15, fontWeight: '800', color: '#0284c7' }}>
+                      ⏱ Medical History ({patientVisits.length} Visits)
+                    </Text>
+                    <Text style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
+                      {patientName} • {regId}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setShowAllVisitsModal(false)} style={{ padding: 4 }}>
+                    <Ionicons name="close" size={22} color="#64748b" />
+                  </TouchableOpacity>
                 </View>
-                <TouchableOpacity onPress={() => setShowAllVisitsModal(false)} style={{ padding: 4 }}>
-                  <Ionicons name="close" size={22} color="#64748b" />
-                </TouchableOpacity>
-              </View>
 
-              {/* Scrollable list of all visits */}
-              <ScrollView style={{ flexGrow: 0 }} showsVerticalScrollIndicator={true}>
-                <View style={{ gap: 8, paddingBottom: 6 }}>
-                  {patientVisits.map((visit, idx) => (
-                    <TouchableOpacity
-                      key={visit.id || idx}
-                      activeOpacity={0.7}
-                      style={{
-                        backgroundColor: '#ffffff',
-                        borderRadius: 12,
-                        borderWidth: 1.5,
-                        borderColor: '#cbd5e1',
-                        padding: 12,
-                        gap: 4,
-                        shadowColor: '#0f172a',
-                        shadowOffset: { width: 0, height: 1 },
-                        shadowOpacity: 0.05,
-                        shadowRadius: 3,
-                        elevation: 1
-                      }}
-                      onPress={() => {
-                        setShowAllVisitsModal(false);
-                        setSelectedVisitModal(visit);
-                      }}
-                    >
-                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <View style={{ backgroundColor: '#f1f5f9', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 }}>
-                          <Text style={{ fontSize: 12, fontWeight: '800', color: '#0f172a' }}>
-                            📅 {renderSafeString(visit.visitDate, 'Today')}
+                {/* Scrollable list of all visits */}
+                <ScrollView style={{ flexGrow: 0 }} showsVerticalScrollIndicator={true}>
+                  <View style={{ gap: 8, paddingBottom: 6 }}>
+                    {patientVisits.map((visit, idx) => (
+                      <TouchableOpacity
+                        key={visit.id || idx}
+                        activeOpacity={0.7}
+                        style={{
+                          backgroundColor: '#ffffff',
+                          borderRadius: 12,
+                          borderWidth: 1.5,
+                          borderColor: '#cbd5e1',
+                          padding: 12,
+                          gap: 4,
+                          shadowColor: '#0f172a',
+                          shadowOffset: { width: 0, height: 1 },
+                          shadowOpacity: 0.05,
+                          shadowRadius: 3,
+                          elevation: 1
+                        }}
+                        onPress={() => {
+                          setShowAllVisitsModal(false);
+                          setSelectedVisitModal(visit);
+                        }}
+                      >
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <View style={{ backgroundColor: '#f1f5f9', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 }}>
+                            <Text style={{ fontSize: 12, fontWeight: '800', color: '#0f172a' }}>
+                              📅 {renderSafeString(visit.visitDate, 'Today')}
+                            </Text>
+                          </View>
+                          <Text style={{ fontSize: 12, fontWeight: '700', color: '#0369a1' }}>
+                            {visit.branch ? `📍 ${visit.branch}` : ''}
                           </Text>
                         </View>
-                        <Text style={{ fontSize: 12, fontWeight: '700', color: '#0369a1' }}>
-                          📍 {renderSafeString(visit.branch, 'Dilshuknagar Branch')}
-                        </Text>
-                      </View>
 
-                      {visit.doctorName ? (
-                        <Text style={{ fontSize: 11.5, color: '#475569', fontWeight: '600', marginTop: 2 }}>
-                          👨‍⚕️ {formatDoctorName(visit.doctorName)}
-                        </Text>
-                      ) : null}
+                        {visit.doctorName ? (
+                          <Text style={{ fontSize: 11.5, color: '#475569', fontWeight: '600', marginTop: 2 }}>
+                            👨‍⚕️ {formatDoctorName(visit.doctorName)}
+                          </Text>
+                        ) : null}
 
-                      {visit.diagnosisNotes ? (
-                        <Text style={{ fontSize: 11, color: '#64748b', marginTop: 1 }} numberOfLines={2}>
-                          🩺 {visit.diagnosisNotes}
-                        </Text>
-                      ) : null}
+                        {visit.diagnosisNotes ? (
+                          <Text style={{ fontSize: 11, color: '#64748b', marginTop: 1 }} numberOfLines={2}>
+                            🩺 {visit.diagnosisNotes}
+                          </Text>
+                        ) : null}
 
-                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 4, paddingTop: 6, borderTopWidth: 1, borderTopColor: '#f1f5f9' }}>
-                        <Text style={{ fontSize: 10.5, color: '#0284c7', fontWeight: '700' }}>
-                          Tap to View Full Prescription & Info ➔
-                        </Text>
-                      </View>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </ScrollView>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 4, paddingTop: 6, borderTopWidth: 1, borderTopColor: '#f1f5f9' }}>
+                          <Text style={{ fontSize: 10.5, color: '#0284c7', fontWeight: '700' }}>
+                            Tap to View Full Prescription & Info ➔
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </ScrollView>
 
-              {/* Close Button */}
-              <TouchableOpacity
-                style={{ backgroundColor: '#0284c7', borderRadius: 10, paddingVertical: 11, alignItems: 'center', marginTop: 12 }}
-                onPress={() => setShowAllVisitsModal(false)}
-              >
-                <Text style={{ color: '#ffffff', fontWeight: '800', fontSize: 12.5 }}>Close</Text>
-              </TouchableOpacity>
+                {/* Close Button */}
+                <TouchableOpacity
+                  style={{ backgroundColor: '#0284c7', borderRadius: 10, paddingVertical: 11, alignItems: 'center', marginTop: 12 }}
+                  onPress={() => setShowAllVisitsModal(false)}
+                >
+                  <Text style={{ color: '#ffffff', fontWeight: '800', fontSize: 12.5 }}>Close</Text>
+                </TouchableOpacity>
+              </View>
             </View>
-          </View>
-        </Modal>
+          </Modal>
+        )}
         {/* FULLSCREEN PRESCRIPTION LIGHTBOX PREVIEW FOR MOBILE */}
-        <Modal
-          visible={!!fullPrescriptionPreview}
-          transparent={true}
-          animationType="none"
-          onRequestClose={() => setFullPrescriptionPreview(null)}
-        >
-          <TouchableOpacity
-            style={{ flex: 1, backgroundColor: 'rgba(15, 23, 42, 0.95)', justifyContent: 'center', alignItems: 'center', padding: 16 }}
-            activeOpacity={1}
-            onPress={() => setFullPrescriptionPreview(null)}
+        {!!fullPrescriptionPreview && (
+          <Modal
+            visible={!!fullPrescriptionPreview}
+            transparent={true}
+            animationType="fade"
+            onRequestClose={() => { setFullPrescriptionPreview(null); setPreviewRotation(0); }}
           >
-            <TouchableOpacity activeOpacity={1} style={{ width: '100%', height: '80%', justifyContent: 'center', alignItems: 'center' }}>
-              <TouchableOpacity
-                style={{ position: 'absolute', top: 10, right: 10, backgroundColor: '#ef4444', borderRadius: 18, width: 36, height: 36, alignItems: 'center', justifyContent: 'center', zIndex: 10 }}
-                onPress={() => setFullPrescriptionPreview(null)}
-              >
-                <Ionicons name="close" size={22} color="#ffffff" />
-              </TouchableOpacity>
-              {!!fullPrescriptionPreview && (
-                <Image source={{ uri: fullPrescriptionPreview }} style={{ width: '100%', height: '100%', borderRadius: 12 }} resizeMode="contain" />
+            <View style={{
+              flex: 1,
+              backgroundColor: 'rgba(0, 0, 0, 0.95)',
+              justifyContent: 'center',
+              alignItems: 'center',
+            }}>
+              {/* Top Navigation & Action Bar */}
+              <SafeAreaView style={{
+                position: 'absolute',
+                top: Platform.OS === 'android' ? 14 : 0,
+                left: 0,
+                right: 0,
+                zIndex: 30,
+              }}>
+                <View style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  paddingHorizontal: 16,
+                  paddingVertical: 10,
+                }}>
+                  {/* Image Counter Badge */}
+                  <View style={{
+                    backgroundColor: 'rgba(255, 255, 255, 0.22)',
+                    paddingHorizontal: 12,
+                    paddingVertical: 6,
+                    borderRadius: 16,
+                    borderWidth: 1,
+                    borderColor: 'rgba(255, 255, 255, 0.3)',
+                  }}>
+                    <Text style={{ color: '#ffffff', fontSize: 13, fontWeight: '800' }}>
+                      {previewImagesList.length > 0
+                        ? `${previewImageIndex + 1} / ${previewImagesList.length}`
+                        : '1 / 1'}
+                    </Text>
+                  </View>
+
+                  {/* Right Actions: Rotate Button + Close Button */}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <TouchableOpacity
+                      onPress={handleRotatePrescriptionImage}
+                      activeOpacity={0.8}
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 6,
+                        backgroundColor: 'rgba(255, 255, 255, 0.25)',
+                        paddingHorizontal: 14,
+                        paddingVertical: 8,
+                        borderRadius: 20,
+                        borderWidth: 1,
+                        borderColor: 'rgba(255, 255, 255, 0.35)',
+                      }}
+                    >
+                      <Ionicons name="reload" size={17} color="#ffffff" />
+                      <Text style={{ color: '#ffffff', fontSize: 12.5, fontWeight: '800' }}>
+                        Rotate ({previewRotation}°)
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      onPress={() => { setFullPrescriptionPreview(null); setPreviewRotation(0); }}
+                      activeOpacity={0.8}
+                      style={{
+                        backgroundColor: 'rgba(239, 68, 68, 0.9)',
+                        width: 38,
+                        height: 38,
+                        borderRadius: 19,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 2 },
+                        shadowOpacity: 0.3,
+                        shadowRadius: 3,
+                        elevation: 4,
+                      }}
+                    >
+                      <Ionicons name="close" size={24} color="#ffffff" />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </SafeAreaView>
+
+              {/* Central Image Container */}
+              <View style={{
+                width: '100%',
+                height: '75%',
+                justifyContent: 'center',
+                alignItems: 'center',
+                paddingHorizontal: 20,
+              }}>
+                {!!fullPrescriptionPreview && (
+                  <Image
+                    source={{ uri: fullPrescriptionPreview }}
+                    style={{
+                      width: '100%',
+                      height: '100%',
+                      resizeMode: 'contain',
+                      transform: [{ rotate: `${previewRotation}deg` }],
+                    }}
+                  />
+                )}
+              </View>
+
+              {/* Left Side Arrow Button < */}
+              {previewImagesList.length > 1 && (
+                <TouchableOpacity
+                  onPress={handlePrevPrescriptionImage}
+                  activeOpacity={0.8}
+                  style={{
+                    position: 'absolute',
+                    left: 14,
+                    top: '50%',
+                    transform: [{ translateY: -26 }],
+                    backgroundColor: 'rgba(15, 23, 42, 0.75)',
+                    width: 52,
+                    height: 52,
+                    borderRadius: 26,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    zIndex: 25,
+                    borderWidth: 1.5,
+                    borderColor: 'rgba(255, 255, 255, 0.5)',
+                    shadowColor: '#000',
+                    shadowOffset: { width: 0, height: 2 },
+                    shadowOpacity: 0.4,
+                    shadowRadius: 4,
+                    elevation: 6,
+                  }}
+                >
+                  <Ionicons name="chevron-back" size={32} color="#ffffff" />
+                </TouchableOpacity>
               )}
-            </TouchableOpacity>
-          </TouchableOpacity>
-        </Modal>
+
+              {/* Right Side Arrow Button > */}
+              {previewImagesList.length > 1 && (
+                <TouchableOpacity
+                  onPress={handleNextPrescriptionImage}
+                  activeOpacity={0.8}
+                  style={{
+                    position: 'absolute',
+                    right: 14,
+                    top: '50%',
+                    transform: [{ translateY: -26 }],
+                    backgroundColor: 'rgba(15, 23, 42, 0.75)',
+                    width: 52,
+                    height: 52,
+                    borderRadius: 26,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    zIndex: 25,
+                    borderWidth: 1.5,
+                    borderColor: 'rgba(255, 255, 255, 0.5)',
+                    shadowColor: '#000',
+                    shadowOffset: { width: 0, height: 2 },
+                    shadowOpacity: 0.4,
+                    shadowRadius: 4,
+                    elevation: 6,
+                  }}
+                >
+                  <Ionicons name="chevron-forward" size={32} color="#ffffff" />
+                </TouchableOpacity>
+              )}
+            </View>
+          </Modal>
+        )}
 
         {/* ADD PRESCRIPTION IMAGE MODAL */}
-        <Modal
-          visible={showAddImageModal}
-          transparent={true}
-          animationType="fade"
-          onRequestClose={() => setShowAddImageModal(false)}
-        >
-          <View style={styles.modalOverlay}>
-            <View style={[styles.modalCard, { padding: 20, maxWidth: 420 }]}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <View style={{ width: 34, height: 34, borderRadius: 8, backgroundColor: '#e0f2fe', alignItems: 'center', justifyContent: 'center' }}>
-                    <Ionicons name="document-attach" size={20} color="#0284c7" />
+        {showAddImageModal && (
+          <Modal
+            visible={showAddImageModal}
+            transparent={true}
+            animationType="fade"
+            onRequestClose={() => setShowAddImageModal(false)}
+          >
+            <View style={styles.modalOverlay}>
+              <View style={[styles.modalCard, { padding: 20, maxWidth: 420 }]}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <View style={{ width: 34, height: 34, borderRadius: 8, backgroundColor: '#e0f2fe', alignItems: 'center', justifyContent: 'center' }}>
+                      <Ionicons name="document-attach" size={20} color="#0284c7" />
+                    </View>
+                    <Text style={{ fontSize: 15, fontWeight: '800', color: '#0f172a' }}>Attach Physical Prescription</Text>
                   </View>
-                  <Text style={{ fontSize: 15, fontWeight: '800', color: '#0f172a' }}>Attach Physical Prescription</Text>
+                  <TouchableOpacity onPress={() => setShowAddImageModal(false)} style={{ padding: 4 }}>
+                    <Ionicons name="close" size={22} color="#64748b" />
+                  </TouchableOpacity>
                 </View>
-                <TouchableOpacity onPress={() => setShowAddImageModal(false)} style={{ padding: 4 }}>
-                  <Ionicons name="close" size={22} color="#64748b" />
-                </TouchableOpacity>
-              </View>
 
-              <Text style={{ fontSize: 12, color: '#64748b', marginBottom: 16 }}>
-                Capture a photo of the handwritten prescription or select from your phone's gallery.
-              </Text>
-
-              {/* PRIMARY ACTIONS: Camera & Gallery */}
-              <View style={{ gap: 10, width: '100%' }}>
-                <TouchableOpacity
-                  activeOpacity={0.8}
-                  onPress={handleTakePhoto}
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 10,
-                    backgroundColor: '#0284c7',
-                    paddingVertical: 13,
-                    borderRadius: 10,
-                    shadowColor: '#0284c7',
-                    shadowOffset: { width: 0, height: 2 },
-                    shadowOpacity: 0.15,
-                    shadowRadius: 4,
-                    elevation: 2
-                  }}
-                >
-                  <Ionicons name="camera" size={20} color="#ffffff" />
-                  <Text style={{ color: '#ffffff', fontWeight: '800', fontSize: 13.5 }}>
-                    📸 Take Photo with Camera
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  activeOpacity={0.8}
-                  onPress={handlePickFromGallery}
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 10,
-                    backgroundColor: '#f0f9ff',
-                    borderWidth: 1.5,
-                    borderColor: '#0284c7',
-                    paddingVertical: 13,
-                    borderRadius: 10
-                  }}
-                >
-                  <Ionicons name="images" size={20} color="#0284c7" />
-                  <Text style={{ color: '#0284c7', fontWeight: '800', fontSize: 13.5 }}>
-                    🖼️ Choose from Gallery / Photos
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* SECONDARY / OPTIONAL: Direct URL Input */}
-              <View style={{ marginTop: 16, borderTopWidth: 1, borderTopColor: '#e2e8f0', paddingTop: 12 }}>
-                <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#475569', marginBottom: 6 }}>
-                  Or enter image URL:
+                <Text style={{ fontSize: 12, color: '#64748b', marginBottom: 16 }}>
+                  Capture a photo of the handwritten prescription or select from your phone's gallery.
                 </Text>
-                <View style={{ flexDirection: 'row', gap: 8 }}>
-                  <TextInput
-                    style={[styles.input, { flex: 1, minHeight: 40, fontSize: 12, paddingHorizontal: 10 }]}
-                    placeholder="https://... or data:image/..."
-                    value={customImageUrlInput}
-                    onChangeText={setCustomImageUrlInput}
-                    autoCapitalize="none"
-                  />
+
+                {/* PRIMARY ACTIONS: Camera & Gallery */}
+                <View style={{ gap: 10, width: '100%' }}>
                   <TouchableOpacity
-                    onPress={() => {
-                      if (customImageUrlInput.trim()) {
-                        handleAddNewPrescriptionImage(customImageUrlInput.trim());
-                        setCustomImageUrlInput('');
-                        setShowAddImageModal(false);
-                      }
-                    }}
-                    disabled={!customImageUrlInput.trim()}
+                    activeOpacity={0.8}
+                    onPress={handleTakePhoto}
                     style={{
-                      backgroundColor: customImageUrlInput.trim() ? '#0f172a' : '#cbd5e1',
-                      paddingHorizontal: 14,
-                      borderRadius: 8,
-                      justifyContent: 'center'
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 10,
+                      backgroundColor: '#0284c7',
+                      paddingVertical: 13,
+                      borderRadius: 10,
+                      shadowColor: '#0284c7',
+                      shadowOffset: { width: 0, height: 2 },
+                      shadowOpacity: 0.15,
+                      shadowRadius: 4,
+                      elevation: 2
                     }}
                   >
-                    <Text style={{ color: '#ffffff', fontWeight: '700', fontSize: 12 }}>Add</Text>
+                    <Ionicons name="camera" size={20} color="#ffffff" />
+                    <Text style={{ color: '#ffffff', fontWeight: '800', fontSize: 13.5 }}>
+                      📸 Take Photo with Camera
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    activeOpacity={0.8}
+                    onPress={handlePickFromGallery}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 10,
+                      backgroundColor: '#f0f9ff',
+                      borderWidth: 1.5,
+                      borderColor: '#0284c7',
+                      paddingVertical: 13,
+                      borderRadius: 10
+                    }}
+                  >
+                    <Ionicons name="images" size={20} color="#0284c7" />
+                    <Text style={{ color: '#0284c7', fontWeight: '800', fontSize: 13.5 }}>
+                      🖼️ Choose from Gallery / Photos
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* SECONDARY / OPTIONAL: Direct URL Input */}
+                <View style={{ marginTop: 16, borderTopWidth: 1, borderTopColor: '#e2e8f0', paddingTop: 12 }}>
+                  <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#475569', marginBottom: 6 }}>
+                    Or enter image URL:
+                  </Text>
+                  <View style={{ flexDirection: 'row', gap: 8 }}>
+                    <TextInput
+                      style={[styles.input, { flex: 1, minHeight: 40, fontSize: 12, paddingHorizontal: 10 }]}
+                      placeholder="https://... or data:image/..."
+                      value={customImageUrlInput}
+                      onChangeText={setCustomImageUrlInput}
+                      autoCapitalize="none"
+                    />
+                    <TouchableOpacity
+                      onPress={() => {
+                        if (customImageUrlInput.trim()) {
+                          handleAddNewPrescriptionImage(customImageUrlInput.trim());
+                          setCustomImageUrlInput('');
+                          setShowAddImageModal(false);
+                        }
+                      }}
+                      disabled={!customImageUrlInput.trim()}
+                      style={{
+                        backgroundColor: customImageUrlInput.trim() ? '#0f172a' : '#cbd5e1',
+                        paddingHorizontal: 14,
+                        borderRadius: 8,
+                        justifyContent: 'center'
+                      }}
+                    >
+                      <Text style={{ color: '#ffffff', fontWeight: '700', fontSize: 12 }}>Add</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            </View>
+          </Modal>
+        )}
+
+        {/* PRESCRIPTION UPLOADING / SAVING OVERLAY MODAL */}
+        {(isUploadingImage || isSavingConsultation) && (
+          <Modal
+            visible={isUploadingImage || isSavingConsultation}
+            transparent={true}
+            animationType="fade"
+          >
+            <View style={styles.modalOverlay}>
+              <View style={[styles.modalCard, { alignItems: 'center', padding: 24, maxWidth: 320 }]}>
+                <ActivityIndicator size="large" color="#0284c7" style={{ marginBottom: 14 }} />
+                <Text style={{ fontSize: 15, fontWeight: '800', color: '#0f172a', marginBottom: 6, textAlign: 'center' }}>
+                  {isSavingConsultation ? 'Saving Consultation...' : 'Uploading Prescription...'}
+                </Text>
+                <Text style={{ fontSize: 12, color: '#64748b', textAlign: 'center', lineHeight: 18 }}>
+                  {isSavingConsultation
+                    ? 'Syncing records & sending patient to reception'
+                    : 'Compressing and securing prescription in cloud storage'}
+                </Text>
+              </View>
+            </View>
+          </Modal>
+        )}
+
+        {/* ENLARGED DRAWING CANVAS MODAL (MOBILE) */}
+        {isCanvasModalOpen && (
+          <Modal
+            visible={isCanvasModalOpen}
+            transparent={true}
+            animationType="slide"
+            onRequestClose={() => setIsCanvasModalOpen(false)}
+          >
+            <View style={styles.modalOverlay}>
+              <View style={[styles.modalCard, { height: '94%', padding: 14, display: 'flex', flexDirection: 'column' }]}>
+                {/* Top Header */}
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 15, fontWeight: '800', color: '#0284c7' }}>✍️ Draw Prescription (Enlarged)</Text>
+                    <Text style={{ fontSize: 10.5, color: '#64748b' }}>
+                      Patient: <Text style={{ fontWeight: '700', color: '#0f172a' }}>{patientName || 'Patient'}</Text> • Reg: <Text style={{ fontWeight: '700', color: '#0284c7' }}>{regId}</Text>
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setIsCanvasModalOpen(false)} style={{ padding: 4 }}>
+                    <Ionicons name="close" size={24} color="#64748b" />
+                  </TouchableOpacity>
+                </View>
+
+                {/* Tools Toolbar */}
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' }}>
+                  {/* Color choices */}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    {[
+                      { name: 'Blue', color: '#0284c7' },
+                      { name: 'Black', color: '#0f172a' },
+                      { name: 'Red', color: '#dc2626' },
+                      { name: 'Green', color: '#16a34a' },
+                    ].map((c) => (
+                      <TouchableOpacity
+                        key={c.color}
+                        onPress={() => setCanvasStrokeColor(c.color)}
+                        style={{
+                          width: 26,
+                          height: 26,
+                          borderRadius: 13,
+                          backgroundColor: c.color,
+                          borderWidth: canvasStrokeColor === c.color ? 2.5 : 1,
+                          borderColor: canvasStrokeColor === c.color ? '#0284c7' : '#cbd5e1'
+                        }}
+                      />
+                    ))}
+                  </View>
+
+                  {/* Thickness choices */}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    {[
+                      { label: 'Fine', width: 2 },
+                      { label: 'Normal', width: 3.5 },
+                      { label: 'Bold', width: 5.5 }
+                    ].map((t) => (
+                      <TouchableOpacity
+                        key={t.width}
+                        onPress={() => setCanvasStrokeWidth(t.width)}
+                        style={{
+                          paddingHorizontal: 8,
+                          paddingVertical: 3,
+                          borderRadius: 5,
+                          borderWidth: 1,
+                          borderColor: canvasStrokeWidth === t.width ? '#0284c7' : '#e2e8f0',
+                          backgroundColor: canvasStrokeWidth === t.width ? '#e0f2fe' : '#ffffff'
+                        }}
+                      >
+                        <Text style={{ fontSize: 10.5, fontWeight: '700', color: canvasStrokeWidth === t.width ? '#0284c7' : '#64748b' }}>
+                          {t.label}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+
+                  {/* Clear button */}
+                  <TouchableOpacity
+                    onPress={clearEnlargedMobileCanvas}
+                    style={{
+                      backgroundColor: '#fff1f2',
+                      borderWidth: 1,
+                      borderColor: '#fecdd3',
+                      paddingHorizontal: 8,
+                      paddingVertical: 4,
+                      borderRadius: 6
+                    }}
+                  >
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: '#e11d48' }}>Clear</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Enlarged Drawing Canvas Area */}
+                <View style={{ flex: 1, backgroundColor: '#ffffff', borderRadius: 10, borderWidth: 1.5, borderColor: '#cbd5e1', marginVertical: 8, overflow: 'hidden', position: 'relative' }}>
+                  {Platform.OS === 'web' ? (
+                    React.createElement('canvas', {
+                      ref: enlargedMobileCanvasRef,
+                      width: 700,
+                      height: 440,
+                      onMouseDown: startWebEnlargedDrawing,
+                      onMouseMove: drawWebEnlarged,
+                      onMouseUp: stopWebEnlargedDrawing,
+                      onMouseLeave: stopWebEnlargedDrawing,
+                      onTouchStart: startWebEnlargedDrawing,
+                      onTouchMove: drawWebEnlarged,
+                      onTouchEnd: stopWebEnlargedDrawing,
+                      style: {
+                        backgroundColor: '#ffffff',
+                        cursor: 'crosshair',
+                        width: '100%',
+                        height: '100%',
+                        touchAction: 'none'
+                      }
+                    })
+                  ) : (
+                    <View
+                      {...enlargedPanResponder.panHandlers}
+                      style={{ width: '100%', height: '100%', backgroundColor: '#ffffff', position: 'relative' }}
+                    >
+                      {/* Strokes Rendering */}
+                      {enlargedStrokes.map((stroke, strokeIdx) => (
+                        <React.Fragment key={strokeIdx}>
+                          {stroke.points.map((pt, ptIdx) => {
+                            if (ptIdx === 0) return null;
+                            const prev = stroke.points[ptIdx - 1];
+                            const dx = pt.x - prev.x;
+                            const dy = pt.y - prev.y;
+                            const length = Math.sqrt(dx * dx + dy * dy);
+                            const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+                            return (
+                              <View
+                                key={ptIdx}
+                                style={{
+                                  position: 'absolute',
+                                  left: prev.x,
+                                  top: prev.y,
+                                  width: Math.max(length, 2),
+                                  height: stroke.width || 3,
+                                  backgroundColor: stroke.color || '#0284c7',
+                                  borderRadius: (stroke.width || 3) / 2,
+                                  transform: [{ rotate: `${angle}deg` }]
+                                }}
+                              />
+                            );
+                          })}
+                        </React.Fragment>
+                      ))}
+
+                      {/* Current Stroke */}
+                      {enlargedCurrentStroke.map((pt, ptIdx) => {
+                        if (ptIdx === 0) return null;
+                        const prev = enlargedCurrentStroke[ptIdx - 1];
+                        const dx = pt.x - prev.x;
+                        const dy = pt.y - prev.y;
+                        const length = Math.sqrt(dx * dx + dy * dy);
+                        const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+                        return (
+                          <View
+                            key={ptIdx}
+                            style={{
+                              position: 'absolute',
+                              left: prev.x,
+                              top: prev.y,
+                              width: Math.max(length, 2),
+                              height: canvasStrokeWidth,
+                              backgroundColor: canvasStrokeColor,
+                              borderRadius: canvasStrokeWidth / 2,
+                              transform: [{ rotate: `${angle}deg` }]
+                            }}
+                          />
+                        );
+                      })}
+
+                      {enlargedStrokes.length === 0 && enlargedCurrentStroke.length === 0 && (
+                        <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'center', alignItems: 'center' }}>
+                          <Text style={{ fontSize: 13, color: '#94a3b8', fontStyle: 'italic' }}>
+                            Draw prescription notes clearly using finger or stylus...
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  )}
+                </View>
+
+                {/* Bottom Action Bar */}
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 6 }}>
+                  <TouchableOpacity
+                    onPress={() => setIsCanvasModalOpen(false)}
+                    style={{ paddingHorizontal: 14, paddingVertical: 9, borderRadius: 8, borderWidth: 1, borderColor: '#cbd5e1', backgroundColor: '#ffffff' }}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: '#64748b' }}>Cancel</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    onPress={handleSaveAndUpdateEnlargedPrescription}
+                    disabled={isSavingEnlarged}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 6,
+                      paddingHorizontal: 16,
+                      paddingVertical: 10,
+                      borderRadius: 8,
+                      backgroundColor: '#16a34a'
+                    }}
+                  >
+                    {isSavingEnlarged ? (
+                      <ActivityIndicator size="small" color="#ffffff" />
+                    ) : (
+                      <Ionicons name="checkmark-circle" size={16} color="#ffffff" />
+                    )}
+                    <Text style={{ fontSize: 12.5, fontWeight: '800', color: '#ffffff' }}>
+                      {isSavingEnlarged ? 'Saving & Updating...' : 'Save & Update Prescription'}
+                    </Text>
                   </TouchableOpacity>
                 </View>
               </View>
             </View>
-          </View>
-        </Modal>
-
-        {/* PRESCRIPTION UPLOADING / SAVING OVERLAY MODAL */}
-        <Modal
-          visible={isUploadingImage || isSavingConsultation}
-          transparent={true}
-          animationType="fade"
-        >
-          <View style={styles.modalOverlay}>
-            <View style={[styles.modalCard, { alignItems: 'center', padding: 24, maxWidth: 320 }]}>
-              <ActivityIndicator size="large" color="#0284c7" style={{ marginBottom: 14 }} />
-              <Text style={{ fontSize: 15, fontWeight: '800', color: '#0f172a', marginBottom: 6, textAlign: 'center' }}>
-                {isSavingConsultation ? 'Saving Consultation...' : 'Uploading Prescription...'}
-              </Text>
-              <Text style={{ fontSize: 12, color: '#64748b', textAlign: 'center', lineHeight: 18 }}>
-                {isSavingConsultation
-                  ? 'Syncing records & sending patient to reception'
-                  : 'Compressing and securing prescription in cloud storage'}
-              </Text>
-            </View>
-          </View>
-        </Modal>
-
-        {/* ENLARGED DRAWING CANVAS MODAL (MOBILE) */}
-        <Modal
-          visible={isCanvasModalOpen}
-          transparent={true}
-          animationType="slide"
-          onRequestClose={() => setIsCanvasModalOpen(false)}
-        >
-          <View style={styles.modalOverlay}>
-            <View style={[styles.modalCard, { height: '94%', padding: 14, display: 'flex', flexDirection: 'column' }]}>
-              {/* Top Header */}
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontSize: 15, fontWeight: '800', color: '#0284c7' }}>✍️ Draw Prescription (Enlarged)</Text>
-                  <Text style={{ fontSize: 10.5, color: '#64748b' }}>
-                    Patient: <Text style={{ fontWeight: '700', color: '#0f172a' }}>{patientName || 'Patient'}</Text> • Reg: <Text style={{ fontWeight: '700', color: '#0284c7' }}>{regId}</Text>
-                  </Text>
-                </View>
-                <TouchableOpacity onPress={() => setIsCanvasModalOpen(false)} style={{ padding: 4 }}>
-                  <Ionicons name="close" size={24} color="#64748b" />
-                </TouchableOpacity>
-              </View>
-
-              {/* Tools Toolbar */}
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' }}>
-                {/* Color choices */}
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  {[
-                    { name: 'Blue', color: '#0284c7' },
-                    { name: 'Black', color: '#0f172a' },
-                    { name: 'Red', color: '#dc2626' },
-                    { name: 'Green', color: '#16a34a' },
-                  ].map((c) => (
-                    <TouchableOpacity
-                      key={c.color}
-                      onPress={() => setCanvasStrokeColor(c.color)}
-                      style={{
-                        width: 26,
-                        height: 26,
-                        borderRadius: 13,
-                        backgroundColor: c.color,
-                        borderWidth: canvasStrokeColor === c.color ? 2.5 : 1,
-                        borderColor: canvasStrokeColor === c.color ? '#0284c7' : '#cbd5e1'
-                      }}
-                    />
-                  ))}
-                </View>
-
-                {/* Thickness choices */}
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                  {[
-                    { label: 'Fine', width: 2 },
-                    { label: 'Normal', width: 3.5 },
-                    { label: 'Bold', width: 5.5 }
-                  ].map((t) => (
-                    <TouchableOpacity
-                      key={t.width}
-                      onPress={() => setCanvasStrokeWidth(t.width)}
-                      style={{
-                        paddingHorizontal: 8,
-                        paddingVertical: 3,
-                        borderRadius: 5,
-                        borderWidth: 1,
-                        borderColor: canvasStrokeWidth === t.width ? '#0284c7' : '#e2e8f0',
-                        backgroundColor: canvasStrokeWidth === t.width ? '#e0f2fe' : '#ffffff'
-                      }}
-                    >
-                      <Text style={{ fontSize: 10.5, fontWeight: '700', color: canvasStrokeWidth === t.width ? '#0284c7' : '#64748b' }}>
-                        {t.label}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-
-                {/* Clear button */}
-                <TouchableOpacity
-                  onPress={clearEnlargedMobileCanvas}
-                  style={{
-                    backgroundColor: '#fff1f2',
-                    borderWidth: 1,
-                    borderColor: '#fecdd3',
-                    paddingHorizontal: 8,
-                    paddingVertical: 4,
-                    borderRadius: 6
-                  }}
-                >
-                  <Text style={{ fontSize: 11, fontWeight: '700', color: '#e11d48' }}>Clear</Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Enlarged Drawing Canvas Area */}
-              <View style={{ flex: 1, backgroundColor: '#ffffff', borderRadius: 10, borderWidth: 1.5, borderColor: '#cbd5e1', marginVertical: 8, overflow: 'hidden', position: 'relative' }}>
-                {Platform.OS === 'web' ? (
-                  React.createElement('canvas', {
-                    ref: enlargedMobileCanvasRef,
-                    width: 700,
-                    height: 440,
-                    onMouseDown: startWebEnlargedDrawing,
-                    onMouseMove: drawWebEnlarged,
-                    onMouseUp: stopWebEnlargedDrawing,
-                    onMouseLeave: stopWebEnlargedDrawing,
-                    onTouchStart: startWebEnlargedDrawing,
-                    onTouchMove: drawWebEnlarged,
-                    onTouchEnd: stopWebEnlargedDrawing,
-                    style: {
-                      backgroundColor: '#ffffff',
-                      cursor: 'crosshair',
-                      width: '100%',
-                      height: '100%',
-                      touchAction: 'none'
-                    }
-                  })
-                ) : (
-                  <View
-                    {...enlargedPanResponder.panHandlers}
-                    style={{ width: '100%', height: '100%', backgroundColor: '#ffffff', position: 'relative' }}
-                  >
-                    {/* Strokes Rendering */}
-                    {enlargedStrokes.map((stroke, strokeIdx) => (
-                      <React.Fragment key={strokeIdx}>
-                        {stroke.points.map((pt, ptIdx) => {
-                          if (ptIdx === 0) return null;
-                          const prev = stroke.points[ptIdx - 1];
-                          const dx = pt.x - prev.x;
-                          const dy = pt.y - prev.y;
-                          const length = Math.sqrt(dx * dx + dy * dy);
-                          const angle = Math.atan2(dy, dx) * (180 / Math.PI);
-                          return (
-                            <View
-                              key={ptIdx}
-                              style={{
-                                position: 'absolute',
-                                left: prev.x,
-                                top: prev.y,
-                                width: Math.max(length, 2),
-                                height: stroke.width || 3,
-                                backgroundColor: stroke.color || '#0284c7',
-                                borderRadius: (stroke.width || 3) / 2,
-                                transform: [{ rotate: `${angle}deg` }]
-                              }}
-                            />
-                          );
-                        })}
-                      </React.Fragment>
-                    ))}
-
-                    {/* Current Stroke */}
-                    {enlargedCurrentStroke.map((pt, ptIdx) => {
-                      if (ptIdx === 0) return null;
-                      const prev = enlargedCurrentStroke[ptIdx - 1];
-                      const dx = pt.x - prev.x;
-                      const dy = pt.y - prev.y;
-                      const length = Math.sqrt(dx * dx + dy * dy);
-                      const angle = Math.atan2(dy, dx) * (180 / Math.PI);
-                      return (
-                        <View
-                          key={ptIdx}
-                          style={{
-                            position: 'absolute',
-                            left: prev.x,
-                            top: prev.y,
-                            width: Math.max(length, 2),
-                            height: canvasStrokeWidth,
-                            backgroundColor: canvasStrokeColor,
-                            borderRadius: canvasStrokeWidth / 2,
-                            transform: [{ rotate: `${angle}deg` }]
-                          }}
-                        />
-                      );
-                    })}
-
-                    {enlargedStrokes.length === 0 && enlargedCurrentStroke.length === 0 && (
-                      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'center', alignItems: 'center' }}>
-                        <Text style={{ fontSize: 13, color: '#94a3b8', fontStyle: 'italic' }}>
-                          Draw prescription notes clearly using finger or stylus...
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-                )}
-              </View>
-
-              {/* Bottom Action Bar */}
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 6 }}>
-                <TouchableOpacity
-                  onPress={() => setIsCanvasModalOpen(false)}
-                  style={{ paddingHorizontal: 14, paddingVertical: 9, borderRadius: 8, borderWidth: 1, borderColor: '#cbd5e1', backgroundColor: '#ffffff' }}
-                >
-                  <Text style={{ fontSize: 12, fontWeight: '700', color: '#64748b' }}>Cancel</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  onPress={handleSaveAndUpdateEnlargedPrescription}
-                  disabled={isSavingEnlarged}
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    gap: 6,
-                    paddingHorizontal: 16,
-                    paddingVertical: 10,
-                    borderRadius: 8,
-                    backgroundColor: '#16a34a'
-                  }}
-                >
-                  {isSavingEnlarged ? (
-                    <ActivityIndicator size="small" color="#ffffff" />
-                  ) : (
-                    <Ionicons name="checkmark-circle" size={16} color="#ffffff" />
-                  )}
-                  <Text style={{ fontSize: 12.5, fontWeight: '800', color: '#ffffff' }}>
-                    {isSavingEnlarged ? 'Saving & Updating...' : 'Save & Update Prescription'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        </Modal>
+          </Modal>
+        )}
 
         {/* 30-DAY DIET PLAN MOBILE FULL MODAL */}
-        <Modal
-          visible={showFull30DayModal}
-          transparent={true}
-          animationType="slide"
-          onRequestClose={() => setShowFull30DayModal(false)}
-        >
-          <View style={styles.modalOverlay}>
-            <View style={[styles.modalCard, { maxHeight: '90%', padding: 14 }]}>
-              {/* Modal Header */}
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontSize: 15, fontWeight: '800', color: '#0284c7' }}>🗓 30-Day Clinical Diet Plan</Text>
-                  <Text style={{ fontSize: 10.5, color: '#64748b' }}>{patientName} • Age: {age || 'N/A'} • BMI: {bmi || 'N/A'}</Text>
+        {showFull30DayModal && (
+          <Modal
+            visible={showFull30DayModal}
+            transparent={true}
+            animationType="slide"
+            onRequestClose={() => setShowFull30DayModal(false)}
+          >
+            <View style={styles.modalOverlay}>
+              <View style={[styles.modalCard, { maxHeight: '90%', padding: 14 }]}>
+                {/* Modal Header */}
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 15, fontWeight: '800', color: '#0284c7' }}>🗓 30-Day Clinical Diet Plan</Text>
+                    <Text style={{ fontSize: 10.5, color: '#64748b' }}>{patientName} • Age: {age || 'N/A'} • BMI: {bmi || 'N/A'}</Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setShowFull30DayModal(false)} style={{ padding: 4 }}>
+                    <Ionicons name="close" size={22} color="#64748b" />
+                  </TouchableOpacity>
                 </View>
-                <TouchableOpacity onPress={() => setShowFull30DayModal(false)} style={{ padding: 4 }}>
-                  <Ionicons name="close" size={22} color="#64748b" />
+
+                {/* Phase Tabs */}
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 10, maxHeight: 36 }}>
+                  {[
+                    { label: 'All 30 Days', val: 'all' },
+                    { label: 'Phase 1: Detox (1-10)', val: 1 },
+                    { label: 'Phase 2: Metabolic (11-20)', val: 2 },
+                    { label: 'Phase 3: Vitality (21-30)', val: 3 }
+                  ].map((p) => {
+                    const isActive = selectedPhaseFilter === p.val;
+                    return (
+                      <TouchableOpacity
+                        key={String(p.val)}
+                        onPress={() => setSelectedPhaseFilter(p.val as any)}
+                        style={{
+                          paddingHorizontal: 10,
+                          paddingVertical: 5,
+                          borderRadius: 14,
+                          backgroundColor: isActive ? '#0284c7' : '#f1f5f9',
+                          marginRight: 6
+                        }}
+                      >
+                        <Text style={{ fontSize: 10.5, fontWeight: '800', color: isActive ? '#ffffff' : '#475569' }}>
+                          {p.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+
+                {/* Day Items List */}
+                <ScrollView style={{ flex: 1 }}>
+                  {dietMenuDays
+                    .filter((item) => selectedPhaseFilter === 'all' || item.phase === selectedPhaseFilter)
+                    .map((item) => (
+                      <View key={item.day} style={{ backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 10, padding: 10, marginBottom: 8 }}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                          <Text style={{ fontSize: 12.5, fontWeight: '800', color: '#0284c7' }}>Day {item.day}</Text>
+                          <Text style={{ fontSize: 9.5, fontWeight: '800', color: item.phase === 1 ? '#1e40af' : item.phase === 2 ? '#92400e' : '#166534', backgroundColor: item.phase === 1 ? '#dbeafe' : item.phase === 2 ? '#fef3c7' : '#dcfce7', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 8 }}>
+                            {item.phaseTitle}
+                          </Text>
+                        </View>
+
+                        <Text style={{ fontSize: 10.5, fontWeight: '700', color: '#475569', marginTop: 2 }}>Breakfast (8:00 AM)</Text>
+                        <TextInput
+                          style={[styles.input, { paddingVertical: 4, paddingHorizontal: 8, fontSize: 11, marginTop: 2, backgroundColor: '#ffffff' }]}
+                          value={item.breakfast}
+                          onChangeText={(txt) => {
+                            const updated = [...dietMenuDays];
+                            const idx = updated.findIndex(d => d.day === item.day);
+                            if (idx !== -1) { updated[idx].breakfast = txt; setDietMenuDays(updated); }
+                          }}
+                        />
+
+                        <Text style={{ fontSize: 10.5, fontWeight: '700', color: '#475569', marginTop: 4 }}>Lunch (1:00 PM)</Text>
+                        <TextInput
+                          style={[styles.input, { paddingVertical: 4, paddingHorizontal: 8, fontSize: 11, marginTop: 2, backgroundColor: '#ffffff' }]}
+                          value={item.lunch}
+                          onChangeText={(txt) => {
+                            const updated = [...dietMenuDays];
+                            const idx = updated.findIndex(d => d.day === item.day);
+                            if (idx !== -1) { updated[idx].lunch = txt; setDietMenuDays(updated); }
+                          }}
+                        />
+
+                        <Text style={{ fontSize: 10.5, fontWeight: '700', color: '#475569', marginTop: 4 }}>Evening Snacks (4:30 PM)</Text>
+                        <TextInput
+                          style={[styles.input, { paddingVertical: 4, paddingHorizontal: 8, fontSize: 11, marginTop: 2, backgroundColor: '#ffffff' }]}
+                          value={item.snacks}
+                          onChangeText={(txt) => {
+                            const updated = [...dietMenuDays];
+                            const idx = updated.findIndex(d => d.day === item.day);
+                            if (idx !== -1) { updated[idx].snacks = txt; setDietMenuDays(updated); }
+                          }}
+                        />
+
+                        <Text style={{ fontSize: 10.5, fontWeight: '700', color: '#475569', marginTop: 4 }}>Dinner (8:00 PM)</Text>
+                        <TextInput
+                          style={[styles.input, { paddingVertical: 4, paddingHorizontal: 8, fontSize: 11, marginTop: 2, backgroundColor: '#ffffff' }]}
+                          value={item.dinner}
+                          onChangeText={(txt) => {
+                            const updated = [...dietMenuDays];
+                            const idx = updated.findIndex(d => d.day === item.day);
+                            if (idx !== -1) { updated[idx].dinner = txt; setDietMenuDays(updated); }
+                          }}
+                        />
+                      </View>
+                    ))}
+                </ScrollView>
+
+                <TouchableOpacity style={[styles.saveBtn, { marginTop: 10 }]} onPress={() => setShowFull30DayModal(false)}>
+                  <Text style={styles.saveBtnText}>Save & Close 30-Day Plan</Text>
                 </TouchableOpacity>
               </View>
-
-              {/* Phase Tabs */}
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 10, maxHeight: 36 }}>
-                {[
-                  { label: 'All 30 Days', val: 'all' },
-                  { label: 'Phase 1: Detox (1-10)', val: 1 },
-                  { label: 'Phase 2: Metabolic (11-20)', val: 2 },
-                  { label: 'Phase 3: Vitality (21-30)', val: 3 }
-                ].map((p) => {
-                  const isActive = selectedPhaseFilter === p.val;
-                  return (
-                    <TouchableOpacity
-                      key={String(p.val)}
-                      onPress={() => setSelectedPhaseFilter(p.val as any)}
-                      style={{
-                        paddingHorizontal: 10,
-                        paddingVertical: 5,
-                        borderRadius: 14,
-                        backgroundColor: isActive ? '#0284c7' : '#f1f5f9',
-                        marginRight: 6
-                      }}
-                    >
-                      <Text style={{ fontSize: 10.5, fontWeight: '800', color: isActive ? '#ffffff' : '#475569' }}>
-                        {p.label}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
-
-              {/* Day Items List */}
-              <ScrollView style={{ flex: 1 }}>
-                {dietMenuDays
-                  .filter((item) => selectedPhaseFilter === 'all' || item.phase === selectedPhaseFilter)
-                  .map((item) => (
-                    <View key={item.day} style={{ backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 10, padding: 10, marginBottom: 8 }}>
-                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                        <Text style={{ fontSize: 12.5, fontWeight: '800', color: '#0284c7' }}>Day {item.day}</Text>
-                        <Text style={{ fontSize: 9.5, fontWeight: '800', color: item.phase === 1 ? '#1e40af' : item.phase === 2 ? '#92400e' : '#166534', backgroundColor: item.phase === 1 ? '#dbeafe' : item.phase === 2 ? '#fef3c7' : '#dcfce7', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 8 }}>
-                          {item.phaseTitle}
-                        </Text>
-                      </View>
-
-                      <Text style={{ fontSize: 10.5, fontWeight: '700', color: '#475569', marginTop: 2 }}>Breakfast (8:00 AM)</Text>
-                      <TextInput
-                        style={[styles.input, { paddingVertical: 4, paddingHorizontal: 8, fontSize: 11, marginTop: 2, backgroundColor: '#ffffff' }]}
-                        value={item.breakfast}
-                        onChangeText={(txt) => {
-                          const updated = [...dietMenuDays];
-                          const idx = updated.findIndex(d => d.day === item.day);
-                          if (idx !== -1) { updated[idx].breakfast = txt; setDietMenuDays(updated); }
-                        }}
-                      />
-
-                      <Text style={{ fontSize: 10.5, fontWeight: '700', color: '#475569', marginTop: 4 }}>Lunch (1:00 PM)</Text>
-                      <TextInput
-                        style={[styles.input, { paddingVertical: 4, paddingHorizontal: 8, fontSize: 11, marginTop: 2, backgroundColor: '#ffffff' }]}
-                        value={item.lunch}
-                        onChangeText={(txt) => {
-                          const updated = [...dietMenuDays];
-                          const idx = updated.findIndex(d => d.day === item.day);
-                          if (idx !== -1) { updated[idx].lunch = txt; setDietMenuDays(updated); }
-                        }}
-                      />
-
-                      <Text style={{ fontSize: 10.5, fontWeight: '700', color: '#475569', marginTop: 4 }}>Evening Snacks (4:30 PM)</Text>
-                      <TextInput
-                        style={[styles.input, { paddingVertical: 4, paddingHorizontal: 8, fontSize: 11, marginTop: 2, backgroundColor: '#ffffff' }]}
-                        value={item.snacks}
-                        onChangeText={(txt) => {
-                          const updated = [...dietMenuDays];
-                          const idx = updated.findIndex(d => d.day === item.day);
-                          if (idx !== -1) { updated[idx].snacks = txt; setDietMenuDays(updated); }
-                        }}
-                      />
-
-                      <Text style={{ fontSize: 10.5, fontWeight: '700', color: '#475569', marginTop: 4 }}>Dinner (8:00 PM)</Text>
-                      <TextInput
-                        style={[styles.input, { paddingVertical: 4, paddingHorizontal: 8, fontSize: 11, marginTop: 2, backgroundColor: '#ffffff' }]}
-                        value={item.dinner}
-                        onChangeText={(txt) => {
-                          const updated = [...dietMenuDays];
-                          const idx = updated.findIndex(d => d.day === item.day);
-                          if (idx !== -1) { updated[idx].dinner = txt; setDietMenuDays(updated); }
-                        }}
-                      />
-                    </View>
-                  ))}
-              </ScrollView>
-
-              <TouchableOpacity style={[styles.saveBtn, { marginTop: 10 }]} onPress={() => setShowFull30DayModal(false)}>
-                <Text style={styles.saveBtnText}>Save & Close 30-Day Plan</Text>
-              </TouchableOpacity>
             </View>
-          </View>
-        </Modal>
+          </Modal>
+        )}
+
+        {/* DIRECT COLLECT FEE MODAL (NO RAZORPAY, NO MESSAGING FOR REBACK) */}
+        {selectedPatientForCollectFee && (
+          <AppointmentPaymentModal
+            visible={showCollectFeeModal}
+            onDismiss={() => {
+              setShowCollectFeeModal(false);
+              setSelectedPatientForCollectFee(null);
+            }}
+            selectedPatientForPayment={selectedPatientForCollectFee}
+            onPaymentSuccess={() => {
+              setShowCollectFeeModal(false);
+              setSelectedPatientForCollectFee(null);
+              Alert.alert('Payment Recorded ✓', 'Past payment recorded successfully.');
+            }}
+          />
+        )}
 
       </ScrollView>
     </View>

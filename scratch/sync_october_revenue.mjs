@@ -92,10 +92,10 @@ async function syncAllBranches() {
   console.log(totals);
 
   const branchConfigs = {
-    kphb: { name: 'KPHB Branch', target: 1200000 },
-    nallagandla: { name: 'Nallagandla Branch', target: 1000000 },
-    dilshuknagar: { name: 'Dilshuknagar Branch', target: 1400000 },
-    chandanagar: { name: 'Chandanagar Branch', target: 900000 }
+    kphb: { name: 'KPHB Branch', target: 725000 },
+    nallagandla: { name: 'Nallagandla Branch', target: 325000 },
+    dilshuknagar: { name: 'Dilshuknagar Branch', target: 225000 },
+    chandanagar: { name: 'Chandanagar Branch', target: 550000 }
   };
 
   for (const [key, cfg] of Object.entries(branchConfigs)) {

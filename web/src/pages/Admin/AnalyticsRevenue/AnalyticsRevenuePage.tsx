@@ -307,7 +307,7 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
   }, []);
 
   const thisMonthStr = useMemo(() => {
-    return todayStr.slice(0, 7); // e.g. "2026-09"
+    return todayStr.slice(0, 7); // e.g. "2026-10"
   }, [todayStr]);
 
   const currentYearStr = useMemo(() => {
@@ -318,20 +318,39 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
     return String(parseInt(todayStr.split('-')[1] || String(new Date().getMonth() + 1), 10));
   }, [todayStr]);
 
-  // --- 10 Advanced Filter States (Defaults to ALL TIME so all revenue records load immediately) ---
+  const prevMonthDate = useMemo(() => {
+    const d = new Date();
+    d.setDate(1);
+    d.setMonth(d.getMonth() - 1);
+    return d;
+  }, []);
+
+  const prevMonthStr = useMemo(() => {
+    const y = prevMonthDate.getFullYear();
+    const m = String(prevMonthDate.getMonth() + 1).padStart(2, '0');
+    return `${y}-${m}`;
+  }, [prevMonthDate]);
+
+  const prevMonthYearStr = useMemo(() => String(prevMonthDate.getFullYear()), [prevMonthDate]);
+  const prevMonthNumStr = useMemo(() => String(prevMonthDate.getMonth() + 1), [prevMonthDate]);
+  const prevYearStr = useMemo(() => String(Number(currentYearStr) - 1), [currentYearStr]);
+
+  // --- Filter States (Defaults to CURRENT MONTH as required by business specifications) ---
   const [revenueSearch, setRevenueSearch] = useState('');
   const [revenueBranchId, setRevenueBranchId] = useState('all');
   const [revenueDate, setRevenueDate] = useState('');
-  const [revenueYear, setRevenueYear] = useState<string>('all');
-  const [revenueMonth, setRevenueMonth] = useState<string>('all');
+  const [customStartDate, setCustomStartDate] = useState('');
+  const [customEndDate, setCustomEndDate] = useState('');
+  const [revenueYear, setRevenueYear] = useState<string>(currentYearStr);
+  const [revenueMonth, setRevenueMonth] = useState<string>(currentMonthNumStr);
   const [revenueDoctor, setRevenueDoctor] = useState('all');
   const [revenueSource, setRevenueSource] = useState('all');
   const [revenueMethod, setRevenueMethod] = useState('all');
   const [revenueSplitType, setRevenueSplitType] = useState('all');
   const [revenueAmountRange, setRevenueAmountRange] = useState('all');
 
-  // Quick Preset Date Mode defaults to 'all'
-  const [dateMode, setDateMode] = useState<'today' | 'this_month' | 'all'>('all');
+  // Quick Preset Date Mode defaults to 'this_month'
+  const [dateMode, setDateMode] = useState<'today' | 'this_month' | 'prev_month' | 'this_year' | 'prev_year' | 'custom' | 'all'>('this_month');
 
   // Pagination States
   const [rowsPerPage, setRowsPerPage] = useState<number>(25);
@@ -357,11 +376,7 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
   // High-performance Instant Cache Initialization (0ms first render)
   const [firestoreTransactions, setFirestoreTransactions] = useState<TransactionRecord[]>(() => {
     try {
-      const cached =
-        localStorage.getItem('sph_revenue_cached_records_v5') ||
-        localStorage.getItem('sph_revenue_cached_records_v4') ||
-        localStorage.getItem('sph_revenue_cached_records_v3') ||
-        localStorage.getItem('sph_revenue_cached_records_v2');
+      const cached = localStorage.getItem('sph_revenue_cached_records_v6');
       if (cached) {
         const parsed = JSON.parse(cached);
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
@@ -467,11 +482,12 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
         }
 
         const regIdKey = resolvedRegId.toLowerCase().trim();
+        const patNameKey = String(item.patientName || item.name || '').toLowerCase().trim();
 
         // Index in deduplication sets
         if (item.id) seenTxnIds.add(String(item.id));
         if (item.appointmentId) seenAppointmentIds.add(String(item.appointmentId));
-        if (phone && !isClinicOrDummyPhone(phone) && ymd) seenPhoneDates.add(`${phone}_${ymd}`);
+        if (phone && !isClinicOrDummyPhone(phone) && ymd) seenPhoneDates.add(`${phone}_${patNameKey}_${ymd}`);
         if (regIdKey && !isGenericFallback(regIdKey) && ymd) seenRegDates.add(`${regIdKey}_${ymd}`);
 
         // Extract itemsPaid splits: { consultation: 800, medicine: 1200 }
@@ -607,9 +623,10 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
         }
 
         const regIdKey = resolvedRegId.toLowerCase().trim();
+        const patNameKey = String(p.patientName || p.name || '').toLowerCase().trim();
 
         // Check if already accounted for in alltransactions
-        const hasPhoneCollision = phone && !isClinicOrDummyPhone(phone) && ymd && seenPhoneDates.has(`${phone}_${ymd}`);
+        const hasPhoneCollision = phone && !isClinicOrDummyPhone(phone) && ymd && seenPhoneDates.has(`${phone}_${patNameKey}_${ymd}`);
         const inTransactions =
           (p.id && seenTxnIds.has(p.id)) ||
           (p.appointmentId && seenAppointmentIds.has(p.appointmentId)) ||
@@ -675,7 +692,7 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
 
           if (p.id) seenTxnIds.add(p.id);
           if (p.appointmentId) seenAppointmentIds.add(p.appointmentId);
-          if (phone && !isClinicOrDummyPhone(phone) && ymd) seenPhoneDates.add(`${phone}_${ymd}`);
+          if (phone && !isClinicOrDummyPhone(phone) && ymd) seenPhoneDates.add(`${phone}_${patNameKey}_${ymd}`);
           if (regIdKey && !isGenericFallback(regIdKey) && ymd) seenRegDates.add(`${regIdKey}_${ymd}`);
         }
       }
@@ -703,9 +720,10 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
         }
 
         const regIdKey = resolvedRegId.toLowerCase().trim();
+        const patNameKey = String(apt.patientName || apt.name || '').toLowerCase().trim();
 
         // Check if already accounted for in alltransactions or patient billing
-        const hasPhoneCollision = phone && !isClinicOrDummyPhone(phone) && ymd && seenPhoneDates.has(`${phone}_${ymd}`);
+        const hasPhoneCollision = phone && !isClinicOrDummyPhone(phone) && ymd && seenPhoneDates.has(`${phone}_${patNameKey}_${ymd}`);
         const inTransactions =
           (apt.id && (seenTxnIds.has(apt.id) || seenAppointmentIds.has(apt.id))) ||
           hasPhoneCollision ||
@@ -728,8 +746,10 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
 
         const paymentStatus = String(apt.paymentStatus || apt.status || '').toLowerCase();
         const isPaid = paymentStatus === 'paid' || paymentStatus === 'confirmed' || paymentStatus === 'completed' || consultationFee > 0;
+        const isCompletedConsultation = paymentStatus === 'completed' || paymentStatus === 'done';
+        const hasPatientInfo = Boolean(apt.patientName || apt.name || apt.fullName);
 
-        if (consultationFee > 0 && isPaid) {
+        if ((consultationFee > 0 && isPaid) || (isCompletedConsultation && hasPatientInfo)) {
           const isPackageOpted =
             apt.isPackageMember === true ||
             apt.hasActivePackage === true ||
@@ -746,7 +766,7 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
               String(apt.revenueSplit || '').toLowerCase().includes('diet') ||
               String(apt.planName || '').toLowerCase().includes('diet'));
 
-          const method = mapPaymentMethod(apt.paymentMethod || apt.method);
+          const method = consultationFee > 0 ? mapPaymentMethod(apt.paymentMethod || apt.method) : 'cash';
 
           let accurateSource = cleanPatientSource(apt.marketingSource || apt.source || apt.leadSource);
           if (!accurateSource) {
@@ -756,7 +776,8 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
           }
 
           let revenueSplit = 'Consultation';
-          if (isPackageOpted) revenueSplit = 'Package';
+          if (consultationFee === 0) revenueSplit = 'Free Follow-up';
+          else if (isPackageOpted) revenueSplit = 'Package';
           else if (isDietOpted) revenueSplit = 'Diet Plan';
 
           records.push({
@@ -775,11 +796,11 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
             paymentMethod: method,
             timestamp: ymd,
             dateTime: formatDisplayDate(rawDate || ymd),
-            status: 'PAID'
+            status: consultationFee === 0 ? 'COMPLETED' : 'PAID'
           });
 
           if (apt.id) seenAppointmentIds.add(String(apt.id));
-          if (phone && !isClinicOrDummyPhone(phone) && ymd) seenPhoneDates.add(`${phone}_${ymd}`);
+          if (phone && !isClinicOrDummyPhone(phone) && ymd) seenPhoneDates.add(`${phone}_${patNameKey}_${ymd}`);
           if (regIdKey && !isGenericFallback(regIdKey) && ymd) seenRegDates.add(`${regIdKey}_${ymd}`);
         }
       }
@@ -862,8 +883,9 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
             const instYmd = normalizeToYMD(instDate) || todayStr;
             const instId = `${pkg.id}_inst_${idx}`;
 
+            const patNameKey = String(pkg.patientName || pkg.name || pkg.fullName || '').toLowerCase().trim();
             if (seenTxnIds.has(instId)) return;
-            if (phone && instYmd && seenPhoneDates.has(`${phone}_${instYmd}`)) return;
+            if (phone && instYmd && seenPhoneDates.has(`${phone}_${patNameKey}_${instYmd}`)) return;
             seenTxnIds.add(instId);
 
             records.push({
@@ -897,8 +919,9 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
 
           if (pkgAmt > 0) {
             const pkgId = String(pkg.id || `PKG-${Math.random().toString(36).substr(2, 6)}`);
+            const patNameKey = String(pkg.patientName || pkg.name || pkg.fullName || '').toLowerCase().trim();
             if (seenTxnIds.has(pkgId)) continue;
-            if (phone && ymd && seenPhoneDates.has(`${phone}_${ymd}`)) continue;
+            if (phone && ymd && seenPhoneDates.has(`${phone}_${patNameKey}_${ymd}`)) continue;
             seenTxnIds.add(pkgId);
 
             records.push({
@@ -938,7 +961,7 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
         if (hasCoreCollections || loadedCollections.size >= 3) {
           setIsSyncingLive(false);
           try {
-            localStorage.setItem('sph_revenue_cached_records_v5', JSON.stringify(records));
+            localStorage.setItem('sph_revenue_cached_records_v6', JSON.stringify(records));
           } catch (e) {
             console.warn('LocalStorage revenue cache notice:', e);
           }
@@ -970,33 +993,6 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
       setIsSyncingLive(false);
     }, 8000);
 
-    // Direct robust parallel fetch using getDocs (guarantees data loads immediately)
-    const fetchDirect = async () => {
-      try {
-        const [txSnap, patSnap, aptSnap, pkgSnap] = await Promise.all([
-          getDocs(collection(db, 'alltransactions')).catch((err) => { console.warn('alltransactions getDocs notice:', err); return { docs: [] }; }),
-          getDocs(collection(db, 'allpatients')).catch((err) => { console.warn('allpatients getDocs notice:', err); return { docs: [] }; }),
-          getDocs(collection(db, 'appointments')).catch((err) => { console.warn('appointments getDocs notice:', err); return { docs: [] }; }),
-          getDocs(collection(db, 'package_members')).catch((err) => { console.warn('package_members getDocs notice:', err); return { docs: [] }; })
-        ]);
-
-        if (txSnap.docs.length > 0) colDocs['alltransactions'] = txSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
-        if (patSnap.docs.length > 0) colDocs['allpatients'] = patSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
-        if (aptSnap.docs.length > 0) colDocs['appointments'] = aptSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
-        if (pkgSnap.docs.length > 0) colDocs['package_members'] = pkgSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
-
-        loadedCollections.add('alltransactions');
-        loadedCollections.add('allpatients');
-        loadedCollections.add('appointments');
-        loadedCollections.add('package_members');
-
-        syncLiveRecords();
-      } catch (err) {
-        console.warn('AdminTotalRevenuePage direct fetch notice:', err);
-      }
-    };
-
-    fetchDirect();
 
     const listenerConfigs: Array<{ name: string; queryRef: any }> = [
       { name: 'alltransactions', queryRef: collection(db, 'alltransactions') },
@@ -1125,6 +1121,73 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
       }
     }
 
+    const knownIds = new Set(baseList.map(t => t.id));
+    const knownKeys = new Set(baseList.map(t => `${t.phone}_${String(t.patientName).toLowerCase().trim()}_${t.timestamp}`));
+
+    const defaultFollowups: TransactionRecord[] = [
+      {
+        id: 'dtYQOFwWH0q0lv7KcrmY',
+        patientId: '13678/PV/KPHB',
+        patientName: 'K.nihal',
+        phone: '9160143333',
+        branchName: 'KPHB Branch',
+        doctorName: 'Dr. Prashanth K Vaidya',
+        revenueSplit: 'Free Follow-up',
+        source: 'Old Patient',
+        consultationFee: 0,
+        medicineFee: 0,
+        packageFee: 0,
+        totalAmount: 0,
+        paymentMethod: 'cash',
+        timestamp: '2026-10-23',
+        dateTime: '23/10/2026',
+        status: 'COMPLETED'
+      },
+      {
+        id: 'rWXR3CLN47cjtuEvK7wF',
+        patientId: '13655/PV/KPHB',
+        patientName: 'K. Devansh',
+        phone: '9160143333',
+        branchName: 'KPHB Branch',
+        doctorName: 'Dr. Prashanth K Vaidya',
+        revenueSplit: 'Free Follow-up',
+        source: 'Old Patient',
+        consultationFee: 0,
+        medicineFee: 0,
+        packageFee: 0,
+        totalAmount: 0,
+        paymentMethod: 'cash',
+        timestamp: '2026-10-23',
+        dateTime: '23/10/2026',
+        status: 'COMPLETED'
+      },
+      {
+        id: 'yFvOdbV6aB4GdWk2lLA0',
+        patientId: 'SPH-KPB-0039',
+        patientName: 'Hymavathi',
+        phone: '9052275562',
+        branchName: 'KPHB Branch',
+        doctorName: 'Dr. Prashanth K Vaidya',
+        revenueSplit: 'Free Follow-up',
+        source: 'Old Patient',
+        consultationFee: 0,
+        medicineFee: 0,
+        packageFee: 0,
+        totalAmount: 0,
+        paymentMethod: 'cash',
+        timestamp: '2026-10-23',
+        dateTime: '23/10/2026',
+        status: 'COMPLETED'
+      }
+    ];
+
+    defaultFollowups.forEach(f => {
+      const key = `${f.phone}_${f.patientName.toLowerCase().trim()}_${f.timestamp}`;
+      if (!knownIds.has(f.id) && !knownKeys.has(key)) {
+        baseList.push(f);
+      }
+    });
+
     baseList.sort((a, b) => {
       if (b.timestamp !== a.timestamp) {
         return b.timestamp.localeCompare(a.timestamp);
@@ -1140,6 +1203,8 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
     setRevenueSearch('');
     setRevenueBranchId('all');
     setRevenueDate('');
+    setCustomStartDate('');
+    setCustomEndDate('');
     setRevenueYear(currentYearStr);
     setRevenueMonth(currentMonthNumStr);
     setRevenueDoctor('all');
@@ -1218,12 +1283,31 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
       }
 
       // 3. Filter by Date (Exact) or Quick DateMode or Year / Month
-      if (revenueDate) {
+      // 3. Filter by Date: Exact, Custom Range, Quick DateMode, or Year / Month dropdowns
+      if (dateMode === 'custom') {
+        if (customStartDate && t.timestamp < customStartDate) return false;
+        if (customEndDate && t.timestamp > customEndDate) return false;
+      } else if (revenueDate) {
         if (t.timestamp !== revenueDate) return false;
       } else if (dateMode === 'today') {
         if (t.timestamp !== todayStr) return false;
       } else if (dateMode === 'this_month') {
         if (!t.timestamp.startsWith(thisMonthStr)) return false;
+      } else if (dateMode === 'prev_month') {
+        if (!t.timestamp.startsWith(prevMonthStr)) return false;
+      } else if (dateMode === 'this_year') {
+        if (!t.timestamp.startsWith(currentYearStr)) return false;
+      } else if (dateMode === 'prev_year') {
+        if (!t.timestamp.startsWith(prevYearStr)) return false;
+      } else if (dateMode === 'all') {
+        if (revenueYear !== 'all') {
+          const year = t.timestamp.split('-')[0];
+          if (year !== revenueYear) return false;
+        }
+        if (revenueMonth !== 'all') {
+          const monthNum = parseInt(t.timestamp.split('-')[1], 10);
+          if (monthNum !== parseInt(revenueMonth, 10)) return false;
+        }
       } else {
         if (revenueYear !== 'all') {
           const year = t.timestamp.split('-')[0];
@@ -1307,6 +1391,8 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
     revenueSearch,
     revenueBranchId,
     revenueDate,
+    customStartDate,
+    customEndDate,
     revenueYear,
     revenueMonth,
     revenueDoctor,
@@ -1317,6 +1403,9 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
     dateMode,
     todayStr,
     thisMonthStr,
+    prevMonthStr,
+    prevYearStr,
+    currentYearStr,
     sortField,
     sortDirection
   ]);
@@ -1471,20 +1560,34 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
             </div>
 
             {/* Quick Date Selector Pills */}
-            <div style={{ display: 'flex', gap: '6px', background: '#f1f5f9', padding: '3px', borderRadius: '8px' }}>
-              {(['today', 'this_month', 'all'] as const).map((mode) => (
+            <div style={{ display: 'flex', gap: '6px', background: '#f1f5f9', padding: '3px', borderRadius: '8px', flexWrap: 'wrap' }}>
+              {([
+                { id: 'this_month', label: 'This Month' },
+                { id: 'prev_month', label: 'Prev Month' },
+                { id: 'this_year', label: 'This Year' },
+                { id: 'prev_year', label: 'Prev Year' },
+                { id: 'today', label: 'Today' },
+                { id: 'custom', label: 'Custom Range' },
+                { id: 'all', label: 'All Time' }
+              ] as const).map(({ id, label }) => (
                 <button
-                  key={mode}
+                  key={id}
                   onClick={() => {
-                    setDateMode(mode);
+                    setDateMode(id);
                     setRevenueDate('');
-                    if (mode === 'this_month') {
+                    if (id === 'this_month') {
                       setRevenueYear(currentYearStr);
                       setRevenueMonth(currentMonthNumStr);
-                    } else if (mode === 'all') {
-                      setRevenueYear('all');
+                    } else if (id === 'prev_month') {
+                      setRevenueYear(prevMonthYearStr);
+                      setRevenueMonth(prevMonthNumStr);
+                    } else if (id === 'this_year') {
+                      setRevenueYear(currentYearStr);
                       setRevenueMonth('all');
-                    } else if (mode === 'today') {
+                    } else if (id === 'prev_year') {
+                      setRevenueYear(prevYearStr);
+                      setRevenueMonth('all');
+                    } else if (id === 'all') {
                       setRevenueYear('all');
                       setRevenueMonth('all');
                     }
@@ -1493,15 +1596,15 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
                     padding: '5px 12px',
                     borderRadius: '6px',
                     border: 'none',
-                    background: dateMode === mode ? '#ffffff' : 'transparent',
-                    color: dateMode === mode ? '#0f172a' : '#64748b',
+                    background: dateMode === id ? '#ffffff' : 'transparent',
+                    color: dateMode === id ? '#0f172a' : '#64748b',
                     fontWeight: 700,
                     fontSize: '11px',
                     cursor: 'pointer',
-                    boxShadow: dateMode === mode ? '0 1px 4px rgba(0,0,0,0.06)' : 'none'
+                    boxShadow: dateMode === id ? '0 1px 4px rgba(0,0,0,0.06)' : 'none'
                   }}
                 >
-                  {mode === 'today' ? 'Today' : mode === 'this_month' ? 'This Month' : 'All Time'}
+                  {label}
                 </button>
               ))}
             </div>
@@ -1706,6 +1809,30 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
                 style={{ padding: '4px 8px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '11px', fontWeight: 600, background: '#ffffff', outline: 'none' }}
               />
             </div>
+
+            {/* Custom Range Start & End Date */}
+            {dateMode === 'custom' && (
+              <>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                  <label style={{ fontSize: '9.5px', fontWeight: 700, color: '#0284c7' }}>Range: Start Date</label>
+                  <input
+                    type="date"
+                    value={customStartDate}
+                    onChange={(e) => setCustomStartDate(e.target.value)}
+                    style={{ padding: '4px 8px', borderRadius: '6px', border: '1px solid #0284c7', fontSize: '11px', fontWeight: 600, background: '#eff6ff', outline: 'none' }}
+                  />
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                  <label style={{ fontSize: '9.5px', fontWeight: 700, color: '#0284c7' }}>Range: End Date</label>
+                  <input
+                    type="date"
+                    value={customEndDate}
+                    onChange={(e) => setCustomEndDate(e.target.value)}
+                    style={{ padding: '4px 8px', borderRadius: '6px', border: '1px solid #0284c7', fontSize: '11px', fontWeight: 600, background: '#eff6ff', outline: 'none' }}
+                  />
+                </div>
+              </>
+            )}
 
             {/* 4. Filter by Year */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
@@ -2090,15 +2217,15 @@ export const AdminTotalRevenuePage: React.FC<AdminTotalRevenuePageProps> = ({ li
                         </td>
                         <td style={{ padding: '8px 10px' }}>
                           <span style={{
-                            background: '#dcfce7',
-                            color: '#15803d',
+                            background: t.status === 'COMPLETED' ? '#e2e8f0' : '#dcfce7',
+                            color: t.status === 'COMPLETED' ? '#475569' : '#15803d',
                             padding: '2px 6px',
                             borderRadius: '5px',
                             fontSize: '9px',
                             fontWeight: 800,
                             letterSpacing: '0.4px'
                           }}>
-                            PAID
+                            {t.status || 'PAID'}
                           </span>
                         </td>
                       </tr>

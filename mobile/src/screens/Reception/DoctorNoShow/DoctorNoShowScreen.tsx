@@ -430,7 +430,8 @@ export const DoctorNoShowScreen: React.FC<DoctorNoShowScreenProps> = ({ currentB
       />
 
       {/* Add Modal */}
-      <Modal visible={showAddModal} transparent animationType="slide" onRequestClose={() => setShowAddModal(false)}>
+      {showAddModal && (
+        <Modal visible={showAddModal} transparent animationType="slide" onRequestClose={() => setShowAddModal(false)}>
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
@@ -677,6 +678,7 @@ export const DoctorNoShowScreen: React.FC<DoctorNoShowScreenProps> = ({ currentB
           </View>
         </View>
       </Modal>
+      )}
     </View>
   );
 };

@@ -88,7 +88,8 @@ export async function createRazorpayPaymentQr(params: CreateQrCodeParams): Promi
         const vpaAddress = vpaReceiver.address;
         const merchantName = encodeURIComponent(vaData.name || 'Spiritual Homeo Private Limited');
         const cleanNote = encodeURIComponent(description.slice(0, 25));
-        const upiUri = `upi://pay?pa=${vpaAddress}&pn=${merchantName}&am=${params.amount}&cu=INR&tn=${cleanNote}`;
+        // NPCI UPI specification parameters: mc=8099 (Medical/Healthcare services), mode=02 (Dynamic QR), tr (Transaction Ref)
+        const upiUri = `upi://pay?pa=${vpaAddress}&pn=${merchantName}&mc=8099&tr=${encodeURIComponent(invoiceId)}&am=${params.amount}&cu=INR&tn=${cleanNote}&mode=02`;
         const dynamicQrImg = `https://api.qrserver.com/v1/create-qr-code/?size=350x350&margin=10&data=${encodeURIComponent(upiUri)}`;
 
         return {
@@ -111,7 +112,7 @@ export async function createRazorpayPaymentQr(params: CreateQrCodeParams): Promi
 
   // 2. Direct Clinic Verified UPI Fallback
   // Formatted strictly as standard NPCI UPI URI so PhonePe, GPay, Paytm can scan it without error
-  const fallbackUpiUri = `upi://pay?pa=spiritualhomeopathy@icici&pn=Spiritual%20Homeopathy&am=${params.amount}&cu=INR&tn=${encodeURIComponent(description.slice(0, 25))}`;
+  const fallbackUpiUri = `upi://pay?pa=spiritualhomeopathy@icici&pn=Spiritual%20Homeopathy&mc=8099&tr=${encodeURIComponent(invoiceId)}&am=${params.amount}&cu=INR&tn=${encodeURIComponent(description.slice(0, 25))}&mode=02`;
   const upiQrImg = `https://api.qrserver.com/v1/create-qr-code/?size=350x350&margin=10&data=${encodeURIComponent(fallbackUpiUri)}`;
 
   return {

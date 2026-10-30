@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   FileText, Clock, MapPin, Phone, Megaphone, AlertCircle, Plus,
   Upload, Trash2, ArrowLeft, Calendar, Check, ExternalLink, RefreshCcw,
@@ -500,12 +500,12 @@ export interface PatientFileUIProps {
 
 export const PatientFileUI: React.FC<PatientFileUIProps> = ({
   patient,
-  doctorName = 'Dr. Ramakrishna Chanduri',
+  doctorName = '',
   onClose,
   onSubmitConsultation,
   onRegisterPackage,
   isStandalonePage = false,
-  userRoleTitle = 'Dilshuknagar Receptionist',
+  userRoleTitle = '',
   isDoctor = false,
 }) => {
   const [activeTab, setActiveTab] = useState<'clinical' | 'diet' | 'media' | 'package'>('clinical');
@@ -514,7 +514,7 @@ export const PatientFileUI: React.FC<PatientFileUIProps> = ({
   const patientName = patient?.patientName || patient?.fullName || patient?.name || patient?.patient_name || patient?.patient || '';
   const regId = patient?.registrationId || patient?.regId || patient?.regNo || patient?.patientId || patient?.registrationNo || patient?.uhid || patient?.patient_id || '';
   const phone = String(patient?.phone || patient?.phoneNumber || patient?.mobile || patient?.mobileNumber || patient?.contact || patient?.contactNumber || patient?.phoneNo || '').trim();
-  const branchName = patient?.branch || patient?.branchName || patient?.targetBranch || 'Dilshuknagar Branch';
+  const branchName = patient?.branch || patient?.branchName || patient?.targetBranch || '';
   const source = patient?.source || patient?.leadSource || patient?.marketingSource || '';
   const subject = patient?.diseases || patient?.subject || patient?.complaint || patient?.chiefComplaints || '';
 
@@ -688,17 +688,146 @@ export const PatientFileUI: React.FC<PatientFileUIProps> = ({
     };
   }, [patient?.id, regId, phone]);
 
-  // --- TAB 3: SHARE MEDIA STATE ---
-  const [sharedMediaList, setSharedMediaList] = useState<string[]>([]);
-  const [showGlobalMediaModal, setShowGlobalMediaModal] = useState(false);
+  // --- TAB 3: SHARE MEDIA STATE (LIVE FROM CLINIC MEDIA MANAGER) ---
+  const isPatientAppBooking = Boolean(
+    patient?.source === 'UserApp' ||
+    patient?.source === 'Patient App' ||
+    patient?.bookingSource === 'Patient App' ||
+    patient?.isAppBooking === true ||
+    patient?.bookedFrom === 'patient_app' ||
+    patient?.isPatientApp === true
+  );
+
+  const [clinicMediaItems, setClinicMediaItems] = useState<any[]>([]);
+  const [sharedPatientMedia, setSharedPatientMedia] = useState<any[]>(() => {
+    if (Array.isArray(patient?.sharedMedia)) return patient.sharedMedia;
+    return [];
+  });
+  const [mediaSearchQuery, setMediaSearchQuery] = useState('');
+  const [selectedMediaCategory, setSelectedMediaCategory] = useState<string>('all');
+  const [sharingMediaId, setSharingMediaId] = useState<string | null>(null);
+
+  // Subscribe to live Reception clinic_media_items
+  useEffect(() => {
+    if (!db) return;
+    try {
+      const q = collection(db, 'clinic_media_items');
+      const unsub = onSnapshot(q, (snap) => {
+        const list: any[] = [];
+        snap.forEach((d) => {
+          list.push({ id: d.id, ...d.data() });
+        });
+        list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        setClinicMediaItems(list);
+      }, (err) => console.log('Media items load notice:', err));
+      return () => unsub();
+    } catch (e) { }
+  }, []);
+
+  // Subscribe to patient's shared media
+  useEffect(() => {
+    if (!db) return;
+    const patId = patient?.id;
+    if (!patId) return;
+    try {
+      const unsub = onSnapshot(doc(db, 'appointments', patId), (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          if (Array.isArray(data.sharedMedia)) {
+            setSharedPatientMedia(data.sharedMedia);
+          }
+        }
+      });
+      return () => unsub();
+    } catch (e) { }
+  }, [patient?.id]);
+
+  const handleShareMediaItem = async (mediaItem: any) => {
+    if (!isPatientAppBooking) {
+      alert('Media sharing is disabled because this appointment was not booked via the Patient App.');
+      return;
+    }
+    const cleanPhone = String(patient?.phone || phone || '').replace(/\D/g, '').slice(-10);
+    const targetDocId = patient?.id;
+    const mediaObj = {
+      id: mediaItem.id || Date.now().toString(),
+      title: mediaItem.title || 'Educational Media',
+      url: mediaItem.url || '',
+      category: mediaItem.category || 'General',
+      notes: mediaItem.notes || '',
+      folderName: mediaItem.folderName || '',
+      doctorName: doctorName || 'Doctor',
+      sharedAt: new Date().toISOString()
+    };
+
+    setSharingMediaId(mediaItem.id || 'new');
+    try {
+      setSharedPatientMedia(prev => {
+        if (prev.some(m => m.url === mediaObj.url || (m.id && m.id === mediaObj.id))) return prev;
+        return [...prev, mediaObj];
+      });
+
+      if (db && targetDocId) {
+        await updateDoc(doc(db, 'appointments', targetDocId), {
+          sharedMedia: arrayUnion(mediaObj),
+          lastUpdated: new Date().toISOString()
+        }).catch(() => { });
+        await updateDoc(doc(db, 'allpatients', targetDocId), {
+          sharedMedia: arrayUnion(mediaObj)
+        }).catch(() => { });
+      }
+
+      if (db) {
+        await addDoc(collection(db, 'shared_patient_media'), {
+          ...mediaObj,
+          patientPhone: cleanPhone,
+          patientName: patientName || 'Patient',
+          regId: regId || '',
+          appointmentId: targetDocId || ''
+        }).catch(() => { });
+      }
+
+      alert(`"${mediaObj.title}" shared successfully to patient's My Media!`);
+    } catch (err: any) {
+      console.warn('Share media error:', err);
+      alert('Failed to share media: ' + (err.message || 'Error'));
+    } finally {
+      setSharingMediaId(null);
+    }
+  };
+
+  const handleRevokeSharedMedia = async (urlToRevoke: string) => {
+    const targetDocId = patient?.id;
+    const updated = sharedPatientMedia.filter(m => m.url !== urlToRevoke);
+    setSharedPatientMedia(updated);
+
+    if (db && targetDocId) {
+      try {
+        await updateDoc(doc(db, 'appointments', targetDocId), {
+          sharedMedia: updated,
+          lastUpdated: new Date().toISOString()
+        });
+        await updateDoc(doc(db, 'allpatients', targetDocId), {
+          sharedMedia: updated
+        });
+      } catch (e) { }
+    }
+  };
 
   // --- TAB 4: REGISTER PACKAGE STATE ---
   const [totalPackageAmount, setTotalPackageAmount] = useState('');
   const [initialAdvancePaid, setInitialAdvancePaid] = useState('0');
   const [packagePurpose, setPackagePurpose] = useState('');
   const [packageDuration, setPackageDuration] = useState('3 Months');
-  const [packageStartDate, setPackageStartDate] = useState('2026-09-07');
-  const [packageEndDate, setPackageEndDate] = useState('2026-12-07');
+  const [packageStartDate, setPackageStartDate] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
+  const [packageEndDate, setPackageEndDate] = useState(() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() + 3);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
 
   // Uploaded Prescriptions State
   const [uploadedImages, setUploadedImages] = useState<string[]>(() => {
@@ -818,6 +947,27 @@ export const PatientFileUI: React.FC<PatientFileUIProps> = ({
   const [selectedVisitModal, setSelectedVisitModal] = useState<any | null>(null);
   const [showAllVisitsModal, setShowAllVisitsModal] = useState(false);
   const [fullPrescriptionPreview, setFullPrescriptionPreview] = useState<string | null>(null);
+  const [historyFilterTab, setHistoryFilterTab] = useState<'all' | 'prescriptions' | 'billing'>('all');
+
+  const allVisitedPrescriptionImages = useMemo(() => {
+    const list: Array<{ uri: string; visitDate: string; visitNumber: number; doctorName?: string }> = [];
+    patientVisits.forEach((v, vIdx) => {
+      const vNum = patientVisits.length - vIdx;
+      const vDate = v.visitDate || '';
+      const imgs = Array.from(new Set([
+        ...(v.canvasPrescriptionUrl ? [v.canvasPrescriptionUrl] : []),
+        ...(v.uploadedPrescriptions || [])
+      ].filter(Boolean)));
+      imgs.forEach((uri) => {
+        list.push({ uri, visitDate: vDate, visitNumber: vNum, doctorName: v.doctorName });
+      });
+    });
+    return list;
+  }, [patientVisits]);
+
+  const totalPaidSum = useMemo(() => {
+    return patientVisits.reduce((acc, v) => acc + (Number(v.paidAmount) || 0), 0);
+  }, [patientVisits]);
 
   useEffect(() => {
     let isMounted = true;
@@ -898,7 +1048,29 @@ export const PatientFileUI: React.FC<PatientFileUIProps> = ({
 
       const updateVisitsState = () => {
         if (!isMounted) return;
-        const allList = Array.from(storeMap.values());
+        const allList = Array.from(storeMap.values()).filter(v => {
+          // 1. Exclude future dates (e.g. 30/10/2026 or any date after today)
+          if (v.normalizedDate && v.normalizedDate > todayYMD) return false;
+
+          // 2. Exclude the current ongoing consultation session that is being edited right now
+          if (patient?.id && (v.id === patient.id || v.appointmentId === patient.id)) {
+            const isCompletedCurrent = String(v.status).toLowerCase() === 'completed';
+            const hasCurrentMeds = Array.isArray(v.medicines) && v.medicines.length > 0;
+            const hasCurrentPaid = Number(v.paidAmount) > 0 || String(v.paymentStatus).toLowerCase() === 'paid';
+            if (!isCompletedCurrent && !hasCurrentMeds && !hasCurrentPaid) {
+              return false;
+            }
+          }
+
+          // 3. Strictly require genuine clinical consultation records or paid billing:
+          const hasMeds = Array.isArray(v.medicines) && v.medicines.length > 0;
+          const hasImages = (Array.isArray(v.uploadedPrescriptions) && v.uploadedPrescriptions.length > 0) || Boolean(v.canvasPrescriptionUrl);
+          const hasDiagnosis = Boolean(v.diagnosisNotes && String(v.diagnosisNotes).trim().length > 0 && v.diagnosisNotes !== 'Clinical consultation & prescription recorded.');
+          const hasPayment = Number(v.paidAmount) > 0 || String(v.paymentStatus).toLowerCase() === 'paid';
+          const isCompleted = String(v.status || '').toLowerCase() === 'completed';
+
+          return hasMeds || hasImages || hasDiagnosis || hasPayment || isCompleted;
+        });
         allList.sort((a, b) => getSortWeight(b) - getSortWeight(a));
         setPatientVisits(allList);
       };
@@ -940,6 +1112,11 @@ export const PatientFileUI: React.FC<PatientFileUIProps> = ({
           let normDate = parseToYMD(rawDate);
           if (!normDate || normDate.toLowerCase() === 'today') {
             normDate = todayYMD;
+          }
+
+          // Skip future appointments (e.g. tomorrow 30/10/2026) - they have not visited yet!
+          if (normDate && normDate > todayYMD) {
+            return;
           }
 
           const normBranch = String(data.branch || data.branchName || branchName || '').toLowerCase().replace(/\s*branch\s*/i, '').trim();
@@ -1010,7 +1187,7 @@ export const PatientFileUI: React.FC<PatientFileUIProps> = ({
             if (m) {
               const mName = m.name || m.medicineName || m.remedyName || (typeof m === 'string' ? m : null);
               if (mName && mName !== '[object Object]') {
-                medicineMap.set(mName, typeof m === 'object' ? m : { name: mName, dosage: '4 Pills', frequency: 'Twice Daily', duration: '7 Days', instructions: 'After food' });
+                medicineMap.set(mName, typeof m === 'object' ? m : { name: mName, dosage: '', frequency: '', duration: '', instructions: '' });
               }
             }
           });
@@ -1056,24 +1233,25 @@ export const PatientFileUI: React.FC<PatientFileUIProps> = ({
 
           const realDiagnosis = data.diagnosisNotes && data.diagnosisNotes !== 'Clinical consultation & prescription recorded.'
             ? data.diagnosisNotes
-            : (existing?.diagnosisNotes || data.notes || data.prescriptionNotes || data.chiefComplaints || data.complaints || data.subject || data.diseases || '');
+            : (existing?.diagnosisNotes || data.prescriptionNotes || '');
 
           storeMap.set(visitKey, {
             id: existing?.id || incomingApptId || docId || visitKey,
             appointmentId: existing?.appointmentId || incomingApptId || docId,
+            status: data.status || existing?.status || '',
             patientName: data.patientName || data.fullName || data.name || patientName,
             regId: data.registrationId || data.regId || data.regNo || regId,
             normalizedDate: normDate,
             normalizedBranch: normBranch || existing?.normalizedBranch,
             visitDate: displayDate,
-            visitTime: data.appointmentTime || data.time || existing?.visitTime || '10:00 AM',
+            visitTime: data.appointmentTime || data.time || existing?.visitTime || '',
             doctorName: docNameFormatted,
-            branch: targetBranch || 'Dilshuknagar Branch',
+            branch: targetBranch || branchName || '',
             consultationMode: data.consultationMode || existing?.consultationMode || 'In-Clinic',
             paidAmount: finalPaidAmount,
             totalAmount: computedTotal > 0 ? computedTotal : finalPaidAmount,
             paymentStatus: paymentStatus,
-            paymentMode: data.paymentMode || existing?.paymentMode || 'Cash',
+            paymentMode: data.paymentMode || existing?.paymentMode || '',
             subject: data.diseases || data.subject || existing?.subject || '',
             diseases: data.diseases || data.subject || existing?.diseases || '',
             diagnosisNotes: realDiagnosis,
@@ -1085,9 +1263,19 @@ export const PatientFileUI: React.FC<PatientFileUIProps> = ({
         }
       };
 
-      // 1. Process current patient appointment data immediately
+      // 1. Process current patient appointment data only if it already has completed consultation/prescription data
       if (patient) {
-        processDoc(patient, patient.id || 'current_patient');
+        const hasPastData = (Array.isArray(patient.items) && patient.items.length > 0) ||
+          (Array.isArray(patient.medicines) && patient.medicines.length > 0) ||
+          (Array.isArray(patient.uploadedPrescriptions) && patient.uploadedPrescriptions.length > 0) ||
+          Boolean(patient.canvasPrescriptionUrl) ||
+          (patient.diagnosisNotes && patient.diagnosisNotes !== 'Clinical consultation & prescription recorded.') ||
+          patient.status === 'completed' ||
+          String(patient.paymentStatus).toLowerCase() === 'paid' ||
+          Number(patient.paidAmount) > 0;
+        if (hasPastData) {
+          processDoc(patient, patient.id || 'current_patient');
+        }
       }
 
       // 2. Process records from memory receptionDataStore pool immediately (0ms instant display)
@@ -1388,7 +1576,7 @@ export const PatientFileUI: React.FC<PatientFileUIProps> = ({
     const numPharmacyFee = Number(pharmacyFee) || 0;
     const numConsultationFee = Number(patient?.consultationFee || patient?.fee || patient?.consultationFeeAmount) || 0;
     const totalCalculated = numPharmacyFee + numDietFee + numConsultationFee;
-    const computedTarget = numPharmacyFee > 0 ? numPharmacyFee : (totalCalculated > 0 ? totalCalculated : 1000);
+    const computedTarget = numPharmacyFee > 0 ? numPharmacyFee : (totalCalculated > 0 ? totalCalculated : 0);
     const docNameToSave = formatDoctorName(doctorName || patient?.doctorName || patient?.doctor);
 
     const basePayload = {
@@ -1877,28 +2065,74 @@ export const PatientFileUI: React.FC<PatientFileUIProps> = ({
             </div>
           </div>
 
-          {/* CARD 2: MEDICAL HISTORY & PAST VISITS */}
+          {/* CARD 2: PATIENT HISTORY & RECORDS (ALL HISTORY, PRESCRIPTIONS & PAYMENT HISTORY) */}
           <div style={{
-            backgroundColor: '#f0f9ff',
+            backgroundColor: '#ffffff',
             borderRadius: '14px',
             border: '1px solid #bae6fd',
             padding: '16px',
             display: 'flex',
             flexDirection: 'column',
-            gap: '12px'
+            gap: '12px',
+            boxShadow: '0 2px 8px rgba(2, 132, 199, 0.05)'
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <h3 style={{ margin: 0, fontSize: '13px', fontWeight: 800, color: '#0284c7', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                ⏱ Medical History ({patientVisits.length})
-              </h3>
-              <span style={{ fontSize: '10.5px', color: '#0369a1', fontWeight: 700, background: '#e0f2fe', padding: '2px 8px', borderRadius: '6px' }}>
-                Click visit for prescription
-              </span>
+            {/* Header with Title & Total Paid */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: '13.5px', fontWeight: 800, color: '#0284c7', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  📋 Patient History & Records
+                </h3>
+                <span style={{ fontSize: '11px', color: '#64748b' }}>
+                  Total Collected: <strong style={{ color: '#16a34a' }}>₹{totalPaidSum.toLocaleString('en-IN')}</strong> ({patientVisits.length} Visits)
+                </span>
+              </div>
             </div>
 
+            {/* 3-Tab Segmented Bar: All History | Prescriptions | Payment History */}
+            <div style={{
+              display: 'flex',
+              background: '#f1f5f9',
+              borderRadius: '10px',
+              padding: '3px',
+              gap: '4px'
+            }}>
+              {[
+                { key: 'all', label: `All History (${patientVisits.length})` },
+                { key: 'prescriptions', label: allVisitedPrescriptionImages.length > 0 ? `Prescriptions (${allVisitedPrescriptionImages.length})` : 'Prescriptions' },
+                { key: 'billing', label: totalPaidSum > 0 ? `Payment History (₹${totalPaidSum.toLocaleString('en-IN')})` : 'Payment History' },
+              ].map((tab) => {
+                const isActive = historyFilterTab === tab.key;
+                return (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setHistoryFilterTab(tab.key as any)}
+                    style={{
+                      flex: 1,
+                      padding: '7px 8px',
+                      borderRadius: '8px',
+                      border: 'none',
+                      background: isActive ? '#ffffff' : 'transparent',
+                      color: isActive ? '#0284c7' : '#64748b',
+                      fontSize: '11px',
+                      fontWeight: isActive ? 800 : 600,
+                      cursor: 'pointer',
+                      boxShadow: isActive ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                      transition: 'all 0.15s ease',
+                      whiteSpace: 'nowrap',
+                      textAlign: 'center'
+                    }}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* TAB CONTENT */}
             {patientVisits.length === 0 ? (
               <div style={{
-                backgroundColor: '#ffffff',
+                backgroundColor: '#f8fafc',
                 borderRadius: '10px',
                 padding: '24px 16px',
                 textAlign: 'center',
@@ -1909,78 +2143,219 @@ export const PatientFileUI: React.FC<PatientFileUIProps> = ({
                 gap: '8px',
                 minHeight: '100px'
               }}>
-                <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600 }}>
+                <span style={{ fontSize: '11.5px', color: '#64748b', fontWeight: 600 }}>
                   No previous visits recorded for this patient.
                 </span>
               </div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                {patientVisits.slice(0, 2).map((visit) => (
-                  <div
-                    key={visit.id}
-                    onClick={() => setSelectedVisitModal(visit)}
-                    style={{
-                      backgroundColor: '#ffffff',
-                      borderRadius: '12px',
-                      border: '1px solid #cbd5e1',
-                      padding: '12px 14px',
-                      cursor: 'pointer',
-                      transition: 'all 0.15s ease',
-                      boxShadow: '0 1px 4px rgba(15, 23, 42, 0.04)',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '6px'
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.borderColor = '#0284c7')}
-                    onMouseLeave={(e) => (e.currentTarget.style.borderColor = '#cbd5e1')}
-                  >
-                    {/* Outer Card: STRICTLY Date & Branch */}
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <span style={{ fontSize: '12px', fontWeight: 800, color: '#0f172a', background: '#f1f5f9', padding: '2px 8px', borderRadius: '6px' }}>
-                        📅 {visit.visitDate}
-                      </span>
-                      <span style={{ fontSize: '12px', fontWeight: 700, color: '#0369a1' }}>
-                        📍 {visit.branch}
-                      </span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '420px', overflowY: 'auto', paddingRight: '2px' }}>
+                
+                {/* 1. PRESCRIPTIONS TAB VIEW */}
+                {historyFilterTab === 'prescriptions' && (
+                  allVisitedPrescriptionImages.length === 0 ? (
+                    <div style={{ padding: '24px', textAlign: 'center', color: '#94a3b8', fontSize: '12px' }}>
+                      No prescription images found for this patient.
                     </div>
-
-                    {/* View Details Action Indicator */}
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '2px', paddingTop: '6px', borderTop: '1px dashed #e2e8f0' }}>
-                      <span style={{ fontSize: '10.5px', color: '#0284c7', fontWeight: 700 }}>
-                        View Full Prescription & Info ➔
-                      </span>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: '10px' }}>
+                      {allVisitedPrescriptionImages.map((img: any, idx: number) => (
+                        <div
+                          key={idx}
+                          onClick={() => setFullPrescriptionPreview(img.uri)}
+                          style={{
+                            background: '#f8fafc',
+                            border: '1px solid #cbd5e1',
+                            borderRadius: '10px',
+                            overflow: 'hidden',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            flexDirection: 'column'
+                          }}
+                        >
+                          <div style={{ padding: '4px 8px', background: '#e0f2fe', display: 'flex', justifyContent: 'space-between', fontSize: '10px', fontWeight: 700, color: '#0369a1' }}>
+                            <span>Visit #{img.visitNumber}</span>
+                            <span>{img.visitDate}</span>
+                          </div>
+                          <div style={{ height: '110px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0f172a' }}>
+                            <img src={img.uri} alt={`Rx ${idx + 1}`} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                          </div>
+                          <div style={{ padding: '4px', textAlign: 'center', fontSize: '10px', color: '#0284c7', fontWeight: 700, background: '#ffffff' }}>
+                            Click to View 🔍
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  </div>
-                ))}
-
-                {patientVisits.length > 2 && (
-                  <button
-                    type="button"
-                    onClick={() => setShowAllVisitsModal(true)}
-                    style={{
-                      backgroundColor: '#f0f9ff',
-                      border: '1.5px dashed #0284c7',
-                      color: '#0284c7',
-                      padding: '9px 12px',
-                      borderRadius: '8px',
-                      fontSize: '11.5px',
-                      fontWeight: 800,
-                      cursor: 'pointer',
-                      width: '100%',
-                      textAlign: 'center',
-                      marginTop: '4px',
-                      transition: 'all 0.2s ease',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '6px'
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#e0f2fe')}
-                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#f0f9ff')}
-                  >
-                    ⏱ View All {patientVisits.length} Past Visits in Popup ➔
-                  </button>
+                  )
                 )}
+
+                {/* 2. ALL HISTORY & PAYMENT HISTORY (BILLING) TAB VIEWS */}
+                {historyFilterTab !== 'prescriptions' && patientVisits.map((visit, vIdx) => {
+                  const visitNum = patientVisits.length - vIdx;
+                  const isPaid = visit.paymentStatus === 'paid' || Number(visit.paidAmount) > 0;
+                  const showPayment = historyFilterTab === 'all' || historyFilterTab === 'billing';
+                  const showPrescription = historyFilterTab === 'all';
+                  const visitImgs = Array.from(new Set([
+                    ...(visit.canvasPrescriptionUrl ? [visit.canvasPrescriptionUrl] : []),
+                    ...(visit.uploadedPrescriptions || [])
+                  ].filter(Boolean)));
+
+                  return (
+                    <div
+                      key={visit.id || vIdx}
+                      style={{
+                        backgroundColor: '#ffffff',
+                        borderRadius: '12px',
+                        border: '1px solid #cbd5e1',
+                        padding: '12px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '8px',
+                        boxShadow: '0 1px 3px rgba(15, 23, 42, 0.04)'
+                      }}
+                    >
+                      {/* Top Header: Visit #, Date, Doctor, Branch, Status */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span style={{ fontSize: '10.5px', fontWeight: 800, color: '#0284c7', background: '#e0f2fe', padding: '2px 6px', borderRadius: '4px' }}>
+                            VISIT #{visitNum}
+                          </span>
+                          <span style={{ fontSize: '12px', fontWeight: 800, color: '#0f172a' }}>
+                            📅 {visit.visitDate}
+                          </span>
+                          <span style={{ fontSize: '11px', color: '#64748b' }}>
+                            • {visit.visitTime}
+                          </span>
+                        </div>
+                        <span style={{
+                          fontSize: '10.5px',
+                          fontWeight: 800,
+                          padding: '2px 8px',
+                          borderRadius: '6px',
+                          background: isPaid ? '#dcfce7' : '#fef3c7',
+                          color: isPaid ? '#15803d' : '#b45309',
+                          border: isPaid ? '1px solid #bbf7d0' : '1px solid #fde68a'
+                        }}>
+                          {isPaid ? `₹${visit.paidAmount} Paid ✓` : 'Fee Pending'}
+                        </span>
+                      </div>
+
+                      {/* Doctor & Branch */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', color: '#64748b' }}>
+                        <span>🩺 {visit.doctorName}</span>
+                        <span>📍 {visit.branch}</span>
+                      </div>
+
+                      {/* Payment Section (Shown in All History and Payment History) */}
+                      {showPayment && (
+                        <div style={{
+                          background: '#f8fafc',
+                          border: '1px solid #e2e8f0',
+                          borderRadius: '8px',
+                          padding: '8px 10px',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center'
+                        }}>
+                          <div>
+                            <span style={{ fontSize: '10px', color: '#64748b', fontWeight: 700, textTransform: 'uppercase' }}>
+                              Amount Paid
+                            </span>
+                            <div style={{ fontSize: '14px', fontWeight: 900, color: isPaid ? '#15803d' : '#b45309' }}>
+                              ₹{visit.paidAmount || 0}
+                            </div>
+                          </div>
+                          <div style={{ textAlign: 'right' }}>
+                            <span style={{ fontSize: '10px', color: '#64748b', fontWeight: 700, textTransform: 'uppercase' }}>
+                              Payment Mode
+                            </span>
+                            <div style={{ fontSize: '11.5px', fontWeight: 700, color: '#0f172a' }}>
+                              💳 {visit.paymentMode || 'Cash'}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Prescriptions & Remedies Section with Edit Rx (Shown in All History tab) */}
+                      {showPrescription && (
+                        <div style={{
+                          background: '#f0f9ff',
+                          border: '1px solid #bae6fd',
+                          borderRadius: '8px',
+                          padding: '8px 10px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '6px'
+                        }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '11.5px', fontWeight: 800, color: '#0284c7', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                              💊 Prescriptions & Remedies ({visit.medicines?.length || 0})
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedVisitModal(visit)}
+                              style={{
+                                background: '#ffffff',
+                                border: '1px solid #0284c7',
+                                color: '#0284c7',
+                                borderRadius: '6px',
+                                padding: '2px 8px',
+                                fontSize: '10.5px',
+                                fontWeight: 800,
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '3px'
+                              }}
+                            >
+                              ✏️ Edit Rx
+                            </button>
+                          </div>
+
+                          {/* Complaints / Diagnosis Notes */}
+                          {(visit.subject || visit.diagnosisNotes) && (
+                            <div style={{ fontSize: '11px', color: '#334155', background: '#ffffff', padding: '6px 8px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                              {visit.subject ? <div><strong>Complaints:</strong> {visit.subject}</div> : null}
+                              {visit.diagnosisNotes ? <div><strong>Diagnosis:</strong> {visit.diagnosisNotes}</div> : null}
+                            </div>
+                          )}
+
+                          {/* Medicines List */}
+                          {visit.medicines && visit.medicines.length > 0 ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                              {visit.medicines.map((med: any, mIdx: number) => {
+                                const details = [med.dosage, med.frequency, med.duration].filter(Boolean).join(' • ');
+                                return (
+                                  <div key={mIdx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#ffffff', padding: '4px 8px', borderRadius: '6px', fontSize: '11px' }}>
+                                    <span style={{ fontWeight: 800, color: '#0f172a' }}>{mIdx + 1}. {med.name}</span>
+                                    {details ? (
+                                      <span style={{ color: '#0284c7', fontWeight: 700 }}>{details}</span>
+                                    ) : null}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : null}
+
+                          {/* Attached Prescription Scans Thumbnails */}
+                          {visitImgs.length > 0 && (
+                            <div style={{ display: 'flex', gap: '6px', alignItems: 'center', marginTop: '4px' }}>
+                              <span style={{ fontSize: '10px', color: '#64748b', fontWeight: 700 }}>Scans:</span>
+                              {visitImgs.map((imgUri: string, iIdx: number) => (
+                                <div
+                                  key={iIdx}
+                                  onClick={() => setFullPrescriptionPreview(imgUri)}
+                                  style={{ width: '32px', height: '32px', borderRadius: '4px', overflow: 'hidden', border: '1px solid #cbd5e1', cursor: 'pointer' }}
+                                >
+                                  <img src={imgUri} alt={`Scan ${iIdx + 1}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -2698,53 +3073,252 @@ export const PatientFileUI: React.FC<PatientFileUIProps> = ({
               boxShadow: '0 2px 8px rgba(15, 23, 42, 0.03)',
               display: 'flex',
               flexDirection: 'column',
-              gap: '16px'
+              gap: '20px'
             }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h2 style={{ margin: 0, fontSize: '15px', fontWeight: 800, color: '#0f172a' }}>
-                  Shared Media & Education
-                </h2>
-                <button
-                  onClick={() => setShowGlobalMediaModal(true)}
-                  style={{
-                    backgroundColor: '#0284c7',
-                    color: '#ffffff',
-                    border: 'none',
-                    padding: '8px 16px',
-                    borderRadius: '8px',
-                    fontSize: '12px',
+              {/* Header & Source Status Banner */}
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                  <div>
+                    <h2 style={{ margin: 0, fontSize: '16px', fontWeight: 800, color: '#0f172a', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      📁 Shared Media & Educational Links
+                    </h2>
+                    <span style={{ fontSize: '12px', color: '#64748b' }}>
+                      Links shared here appear instantly in the patient's mobile app under <strong>Profile → My Media</strong>.
+                    </span>
+                  </div>
+                  <span style={{
+                    fontSize: '11.5px',
                     fontWeight: 800,
-                    cursor: 'pointer',
+                    padding: '4px 10px',
+                    borderRadius: '6px',
+                    backgroundColor: isPatientAppBooking ? '#dcfce7' : '#fef3c7',
+                    color: isPatientAppBooking ? '#166534' : '#b45309',
+                    border: isPatientAppBooking ? '1px solid #bbf7d0' : '1px solid #fde68a'
+                  }}>
+                    {isPatientAppBooking ? '📱 Booked via Patient App' : `🏢 Booked via ${patient?.source || 'Reception'}`}
+                  </span>
+                </div>
+
+                {/* Conditional Lock Banner */}
+                {!isPatientAppBooking ? (
+                  <div style={{
+                    background: '#fffbeb',
+                    border: '1.5px solid #fde68a',
+                    borderRadius: '10px',
+                    padding: '14px 16px',
                     display: 'flex',
                     alignItems: 'center',
-                    gap: '6px'
-                  }}
-                >
-                  📁 Share Global Library Media
-                </button>
+                    gap: '12px'
+                  }}>
+                    <span style={{ fontSize: '22px' }}>🔒</span>
+                    <div>
+                      <h4 style={{ margin: 0, fontSize: '13px', fontWeight: 800, color: '#92400e' }}>
+                        Media Sharing to Patient App is Disabled
+                      </h4>
+                      <p style={{ margin: '2px 0 0 0', fontSize: '11.5px', color: '#b45309', lineHeight: '17px' }}>
+                        This appointment was booked via <strong>{patient?.source || 'Reception / Web'}</strong>.
+                        Direct media sharing to the patient profile is only permitted for appointments booked through the <strong>Patient App</strong>.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{
+                    background: '#f0fdf4',
+                    border: '1.5px solid #bbf7d0',
+                    borderRadius: '10px',
+                    padding: '12px 16px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '12px'
+                  }}>
+                    <span style={{ fontSize: '20px' }}>✅</span>
+                    <div>
+                      <h4 style={{ margin: 0, fontSize: '13px', fontWeight: 800, color: '#166534' }}>
+                        Patient App Connected
+                      </h4>
+                      <p style={{ margin: '2px 0 0 0', fontSize: '11.5px', color: '#15803d' }}>
+                        Select any media link from the Reception repository below to share directly with this patient.
+                      </p>
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {sharedMediaList.length === 0 ? (
-                <div style={{
-                  backgroundColor: '#ffffff',
-                  border: '1px dashed #bae6fd',
-                  borderRadius: '10px',
-                  padding: '40px 20px',
-                  textAlign: 'center',
-                  color: '#64748b',
-                  fontSize: '12px'
-                }}>
-                  No global media has been shared with this patient yet.
+              {/* SECTION 1: CURRENTLY SHARED MEDIA */}
+              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '16px' }}>
+                <h3 style={{ margin: '0 0 10px 0', fontSize: '13.5px', fontWeight: 800, color: '#0f172a', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  📤 Currently Shared with Patient ({sharedPatientMedia.length})
+                </h3>
+
+                {sharedPatientMedia.length === 0 ? (
+                  <div style={{ padding: '20px', textAlign: 'center', color: '#94a3b8', fontSize: '12px', background: '#ffffff', borderRadius: '8px', border: '1px dashed #cbd5e1' }}>
+                    No media links have been shared with this patient yet.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {sharedPatientMedia.map((m: any, idx: number) => (
+                      <div key={idx} style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        background: '#ffffff',
+                        border: '1px solid #e2e8f0',
+                        borderRadius: '8px',
+                        padding: '10px 14px'
+                      }}>
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a' }}>{m.title || 'Educational Link'}</span>
+                            {m.category && (
+                              <span style={{ fontSize: '10px', fontWeight: 700, padding: '2px 6px', background: '#e0f2fe', color: '#0284c7', borderRadius: '4px' }}>
+                                {m.category}
+                              </span>
+                            )}
+                          </div>
+                          <a href={m.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: '11px', color: '#0284c7', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '4px', marginTop: '2px' }}>
+                            🔗 {m.url}
+                          </a>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <button
+                            type="button"
+                            onClick={() => window.open(m.url, '_blank')}
+                            style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: '6px', padding: '4px 10px', fontSize: '11px', fontWeight: 700, color: '#334155', cursor: 'pointer' }}
+                          >
+                            Open Link
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRevokeSharedMedia(m.url)}
+                            style={{ background: '#fee2e2', border: '1px solid #fca5a5', borderRadius: '6px', padding: '4px 10px', fontSize: '11px', fontWeight: 700, color: '#dc2626', cursor: 'pointer' }}
+                          >
+                            Revoke
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* SECTION 2: AVAILABLE CLINIC MEDIA LINKS (FROM RECEPTION MEDIA MANAGER) */}
+              <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
+                  <h3 style={{ margin: 0, fontSize: '13.5px', fontWeight: 800, color: '#0f172a' }}>
+                    📚 Clinic Media Links from Reception ({clinicMediaItems.length})
+                  </h3>
+                  <input
+                    type="text"
+                    placeholder="Search media by title or keyword..."
+                    value={mediaSearchQuery}
+                    onChange={(e) => setMediaSearchQuery(e.target.value)}
+                    style={{
+                      padding: '6px 12px',
+                      borderRadius: '8px',
+                      border: '1px solid #cbd5e1',
+                      fontSize: '12px',
+                      width: '260px'
+                    }}
+                  />
                 </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  {sharedMediaList.map((item, idx) => (
-                    <div key={idx} style={{ padding: '10px 14px', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', fontWeight: 700 }}>
-                      📄 {item}
-                    </div>
-                  ))}
-                </div>
-              )}
+
+                {clinicMediaItems.length === 0 ? (
+                  <div style={{ padding: '30px', textAlign: 'center', color: '#64748b', fontSize: '12px', background: '#f8fafc', borderRadius: '8px' }}>
+                    No media links saved by Reception in Media Manager yet.
+                  </div>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '10px' }}>
+                    {clinicMediaItems
+                      .filter((item: any) => {
+                        const q = mediaSearchQuery.toLowerCase().trim();
+                        if (!q) return true;
+                        return (
+                          item.title?.toLowerCase().includes(q) ||
+                          item.url?.toLowerCase().includes(q) ||
+                          item.folderName?.toLowerCase().includes(q) ||
+                          item.notes?.toLowerCase().includes(q)
+                        );
+                      })
+                      .map((item: any) => {
+                        const isAlreadyShared = sharedPatientMedia.some(m => m.url === item.url);
+                        const isSharingThis = sharingMediaId === item.id;
+
+                        return (
+                          <div
+                            key={item.id}
+                            style={{
+                              background: '#ffffff',
+                              border: isAlreadyShared ? '1.5px solid #86efac' : '1px solid #cbd5e1',
+                              borderRadius: '10px',
+                              padding: '12px',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              justifyContent: 'space-between',
+                              gap: '8px',
+                              boxShadow: '0 1px 3px rgba(0,0,0,0.03)'
+                            }}
+                          >
+                            <div>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '6px' }}>
+                                <span style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a' }}>
+                                  {item.title}
+                                </span>
+                                {item.folderName && (
+                                  <span style={{ fontSize: '10px', fontWeight: 700, padding: '2px 6px', background: '#f1f5f9', color: '#475569', borderRadius: '4px', whiteSpace: 'nowrap' }}>
+                                    📁 {item.folderName}
+                                  </span>
+                                )}
+                              </div>
+                              {item.notes ? (
+                                <p style={{ fontSize: '11.5px', color: '#64748b', margin: '4px 0 0 0' }}>
+                                  {item.notes}
+                                </p>
+                              ) : null}
+                              <a
+                                href={item.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{ fontSize: '11px', color: '#0284c7', textDecoration: 'none', display: 'block', marginTop: '6px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                              >
+                                🔗 {item.url}
+                              </a>
+                            </div>
+
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '4px' }}>
+                              {isAlreadyShared ? (
+                                <span style={{ fontSize: '11px', fontWeight: 800, color: '#16a34a', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                  ✓ Shared with Patient
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={!isPatientAppBooking || isSharingThis}
+                                  onClick={() => handleShareMediaItem(item)}
+                                  style={{
+                                    backgroundColor: !isPatientAppBooking ? '#e2e8f0' : '#0284c7',
+                                    color: !isPatientAppBooking ? '#94a3b8' : '#ffffff',
+                                    border: 'none',
+                                    padding: '6px 14px',
+                                    borderRadius: '6px',
+                                    fontSize: '11.5px',
+                                    fontWeight: 800,
+                                    cursor: !isPatientAppBooking ? 'not-allowed' : 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '4px'
+                                  }}
+                                  title={!isPatientAppBooking ? 'Media sharing is disabled for offline / reception bookings.' : 'Share directly to patient app'}
+                                >
+                                  {isSharingThis ? 'Sharing...' : !isPatientAppBooking ? '🔒 Disabled' : '+ Share to Patient App'}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -2871,44 +3445,7 @@ export const PatientFileUI: React.FC<PatientFileUIProps> = ({
 
       </div>
 
-      {/* SHARE GLOBAL MEDIA MODAL */}
-      {showGlobalMediaModal && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: 'rgba(0,0,0,0.6)',
-          zIndex: 10000,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          padding: '16px'
-        }}>
-          <div style={{ backgroundColor: '#ffffff', borderRadius: '16px', padding: '24px', width: '100%', maxWidth: '440px', boxShadow: '0 20px 25px rgba(0,0,0,0.2)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0', paddingBottom: '12px', marginBottom: '14px' }}>
-              <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 800, color: '#0f172a' }}>Select Media to Share</h3>
-              <button onClick={() => setShowGlobalMediaModal(false)} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: '18px' }}>×</button>
-            </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {['Homeopathy Guidelines & Food Care PDF', 'Diet Routine Video Series', 'Skin & Hair Awareness Guide'].map(item => (
-                <button
-                  key={item}
-                  onClick={() => {
-                    if (!sharedMediaList.includes(item)) setSharedMediaList([...sharedMediaList, item]);
-                    setShowGlobalMediaModal(false);
-                  }}
-                  style={{ padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', backgroundColor: '#f8fafc', fontWeight: 700, cursor: 'pointer', textAlign: 'left' }}
-                >
-                  + {item}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ALL PAST VISITS FULL POPUP MODAL */}
       {showAllVisitsModal && (
@@ -3195,19 +3732,23 @@ export const PatientFileUI: React.FC<PatientFileUIProps> = ({
                       </tr>
                     </thead>
                     <tbody>
-                      {selectedVisitModal.medicines.map((med: any, idx: number) => (
-                        <tr key={idx} style={{ borderBottom: '1px solid #e2e8f0', background: idx % 2 === 0 ? '#ffffff' : '#f8fafc' }}>
-                          <td style={{ padding: '8px 12px', fontWeight: 800, color: '#0f172a' }}>
-                            {med.name || med.medicineName || 'Homeopathic Remedy'}
-                          </td>
-                          <td style={{ padding: '8px 12px', color: '#0284c7', fontWeight: 700 }}>
-                            {med.dosage || '4 Pills'} • {med.frequency || 'Twice Daily'}
-                          </td>
-                          <td style={{ padding: '8px 12px', color: '#475569', fontWeight: 600 }}>
-                            {med.duration || '7 Days'} ({med.instructions || 'After meals'})
-                          </td>
-                        </tr>
-                      ))}
+                      {selectedVisitModal.medicines.map((med: any, idx: number) => {
+                        const doseFreq = [med.dosage, med.frequency].filter(Boolean).join(' • ');
+                        const durInstr = [med.duration, med.instructions ? `(${med.instructions})` : ''].filter(Boolean).join(' ');
+                        return (
+                          <tr key={idx} style={{ borderBottom: '1px solid #e2e8f0', background: idx % 2 === 0 ? '#ffffff' : '#f8fafc' }}>
+                            <td style={{ padding: '8px 12px', fontWeight: 800, color: '#0f172a' }}>
+                              {med.name || med.medicineName || 'Homeopathic Remedy'}
+                            </td>
+                            <td style={{ padding: '8px 12px', color: '#0284c7', fontWeight: 700 }}>
+                              {doseFreq || '—'}
+                            </td>
+                            <td style={{ padding: '8px 12px', color: '#475569', fontWeight: 600 }}>
+                              {durInstr || '—'}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

@@ -4,8 +4,9 @@ import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createDocument, sendBookingWhatsAppNotification, sendBookingSMS, sanitizeDoctorName } from '@app/shared';
 import {
-  getSafeDb, collection, onSnapshot, addDoc, setDoc, deleteDoc, doc, query, where, limit, getDocs
+  getSafeDb, collection, onSnapshot, addDoc, setDoc, deleteDoc, doc, getDoc, query, where, limit, getDocs
 } from '../../../utils/firebaseSafe';
+import { AppointmentPaymentModal } from '../../../components/AppointmentPaymentModal';
 import { generateRegistrationId, getBranchShortcut } from '../../../utils/idGenerator';
 import { receptionDataStore } from '../../../utils/receptionDataStore';
 import { getPatientVisitState } from '../../../utils/patientVisitState';
@@ -49,8 +50,11 @@ const STORAGE_APPTS_KEY = '@sph_appts_cache_v2';
 interface BookAppointmentScreenProps {
   currentBranch?: string;
   userRole?: string;
-  onNavigate?: (tab: string) => void;
+  onNavigate?: (tab: string, patientData?: any) => void;
   onBack?: () => void;
+  isRebackMode?: boolean;
+  initialPatient?: any;
+  isActive?: boolean;
 }
 
 interface TimeSlot {
@@ -340,6 +344,8 @@ const AnalogClockModal: React.FC<AnalogClockModalProps> = ({
   const activeHandCoords = mode === 'hours'
     ? getHourCoords(selectedHour)
     : getMinuteCoords(selectedMinute);
+
+  if (!visible) return null;
 
   return (
     <Modal
@@ -657,7 +663,10 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
   currentBranch = "Nallagandla",
   userRole,
   onNavigate,
-  onBack
+  onBack,
+  isRebackMode = false,
+  initialPatient,
+  isActive = true,
 }) => {
   const isHR = userRole === 'hr' || userRole === 'admin' || currentBranch === 'All Branches' || currentBranch === 'HR' || currentBranch === 'Admin';
   const [selectedBranch, setSelectedBranch] = useState<string>(() => {
@@ -696,6 +705,299 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
     homeBranch?: string;
     branchName?: string;
   }>({ phone: '', fullName: '', patientName: '', patientId: '', regID: '', registrationId: '', source: '', homeBranch: '', branchName: '' });
+  // REBACK MODE STATES: Manual Registration ID & Duplicate ID Validation
+  const [manualRegId, setManualRegId] = useState('');
+  const [isCheckingRegId, setIsCheckingRegId] = useState(false);
+  const [regIdError, setRegIdError] = useState('');
+  const [regIdValid, setRegIdValid] = useState(false);
+  const [foundProfileInfo, setFoundProfileInfo] = useState<{
+    name: string;
+    phone: string;
+    branch?: string;
+    regId: string;
+    docId?: string;
+  } | null>(null);
+  const [showRegIdSuggestions, setShowRegIdSuggestions] = useState(false);
+
+  // REBACK MODE DIRECT PAYMENT / COLLECT FEE MODAL STATES
+  const [showRebackPaymentModal, setShowRebackPaymentModal] = useState(false);
+  const [savedRebackPatientForPayment, setSavedRebackPatientForPayment] = useState<any>(null);
+
+  // FETCH / LOOKUP PROFILE BY PROFILE ID OR REGISTRATION ID (Instant Cache + Firestore)
+  const triggerProfileLookup = useCallback(async (inputVal: string) => {
+    const rawVal = (inputVal || '').trim();
+    const testId = rawVal.toUpperCase();
+    if (!testId || testId.length < 2) return;
+
+    setIsCheckingRegId(true);
+    setRegIdError('');
+
+    try {
+      const cleanDigits = rawVal.replace(/\D/g, '').slice(-10);
+      const is10DigitPhone = cleanDigits.length === 10;
+      const normTest = testId.replace(/[\s\-\/\.]/g, '');
+
+      const isMatch = (item: any, docId?: string) => {
+        if (!item) return false;
+        // Direct match against all possible ID attributes
+        const candidates = [
+          item.registrationId,
+          item.regId,
+          item.regID,
+          item.regNo,
+          item.patientId,
+          item.patient_id,
+          item.registration_id,
+          item.uhid,
+          item.customId,
+          item.custom_id,
+          item.opdNumber,
+          item.opdNo,
+          item.mrn,
+          item.id,
+          docId
+        ];
+        for (const candidate of candidates) {
+          if (!candidate) continue;
+          const s = String(candidate).trim();
+          if (s.toUpperCase() === testId) return true;
+          // Normalized match (ignore dashes, slashes, spaces)
+          const normCandidate = s.toUpperCase().replace(/[\s\-\/\.]/g, '');
+          if (normCandidate && normTest && normCandidate === normTest) return true;
+        }
+
+        // Match by phone number if entered 10 digits
+        if (is10DigitPhone) {
+          const itemPhone = String(item.phone || item.phoneNumber || item.mobile || item.patientPhone || '').replace(/\D/g, '').slice(-10);
+          if (itemPhone === cleanDigits) return true;
+        }
+
+        return false;
+      };
+
+      let matchedData: any = null;
+      let matchedId: string = '';
+
+      // 1. Check in-memory store pool (0ms instant)
+      const storePool = receptionDataStore.getAllCollectionsPool() || [];
+      const inPool = storePool.find(p => isMatch(p, p?.id || p?.docId));
+      if (inPool) {
+        matchedData = inPool;
+        matchedId = inPool.id || inPool.docId || '';
+      }
+
+      if (!matchedData) {
+        const storeAppts = receptionDataStore.getAppointments() || [];
+        const inAppt = storeAppts.find(a => isMatch(a, a?.id || a?.docId));
+        if (inAppt) {
+          matchedData = inAppt;
+          matchedId = inAppt.id || inAppt.docId || '';
+        }
+      }
+
+      if (!matchedData) {
+        const storePkg = receptionDataStore.getPackageMembers() || [];
+        const inPkg = storePkg.find(m => isMatch(m, m?.id || m?.docId));
+        if (inPkg) {
+          matchedData = inPkg;
+          matchedId = inPkg.id || inPkg.docId || '';
+        }
+      }
+
+      // 2. Query Firestore if not found in cache
+      if (!matchedData) {
+        const activeDb = getSafeDb();
+        if (activeDb) {
+          const safeQuery = (q: any) => Promise.race([
+            getDocs(q).catch(() => ({ empty: true, docs: [] })),
+            new Promise(res => setTimeout(() => res({ empty: true, docs: [] }), 2500))
+          ]);
+
+          const cols = ['patients', 'allpatients', 'appointments', 'patient_profiles'];
+          const fields = ['registrationId', 'regId', 'regID', 'regNo', 'patientId', 'patient_id', 'uhid'];
+
+          for (const col of cols) {
+            if (matchedData) break;
+            for (const field of fields) {
+              try {
+                const snap: any = await safeQuery(query(collection(activeDb, col), where(field, '==', testId), limit(1)));
+                if (snap && snap.docs && snap.docs.length > 0) {
+                  matchedData = snap.docs[0].data();
+                  matchedId = snap.docs[0].id;
+                  break;
+                }
+                if (rawVal !== testId) {
+                  const snapOrig: any = await safeQuery(query(collection(activeDb, col), where(field, '==', rawVal), limit(1)));
+                  if (snapOrig && snapOrig.docs && snapOrig.docs.length > 0) {
+                    matchedData = snapOrig.docs[0].data();
+                    matchedId = snapOrig.docs[0].id;
+                    break;
+                  }
+                }
+              } catch (_) {}
+            }
+
+            // If phone number entered, check phone fields
+            if (!matchedData && is10DigitPhone) {
+              for (const phoneField of ['phone', 'phoneNumber', 'mobile']) {
+                try {
+                  const snapPhone: any = await safeQuery(query(collection(activeDb, col), where(phoneField, '==', cleanDigits), limit(1)));
+                  if (snapPhone && snapPhone.docs && snapPhone.docs.length > 0) {
+                    matchedData = snapPhone.docs[0].data();
+                    matchedId = snapPhone.docs[0].id;
+                    break;
+                  }
+                } catch (_) {}
+              }
+            }
+
+            // Direct document ID lookup
+            if (!matchedData) {
+              try {
+                const docSnap = await getDoc(doc(activeDb, col, rawVal)).catch(() => null);
+                if (docSnap && docSnap.exists()) {
+                  matchedData = docSnap.data();
+                  matchedId = docSnap.id;
+                  break;
+                }
+                if (rawVal !== testId) {
+                  const docSnapUpper = await getDoc(doc(activeDb, col, testId)).catch(() => null);
+                  if (docSnapUpper && docSnapUpper.exists()) {
+                    matchedData = docSnapUpper.data();
+                    matchedId = docSnapUpper.id;
+                    break;
+                  }
+                }
+              } catch (_) {}
+            }
+          }
+        }
+      }
+
+      // 3. If matched, apply to form
+      if (matchedData) {
+        const pName = matchedData.fullName || matchedData.patientName || matchedData.name || matchedData.patient_name || matchedData.patient || '';
+        const pPhone = matchedData.phone || matchedData.patientPhone || matchedData.phoneNumber || matchedData.mobile || matchedData.contact || '';
+        const pEmail = matchedData.email || matchedData.emailAddress || '';
+        const pDiseases = matchedData.diseases || matchedData.subject || matchedData.symptoms || matchedData.problem || matchedData.complaint || '';
+        const pBranch = matchedData.branchName || matchedData.branch || matchedData.targetBranch || matchedData.homeBranch || '';
+        const pDoctor = matchedData.doctorName || matchedData.doctor || '';
+        const reg = matchedData.registrationId || matchedData.regId || matchedData.regID || matchedData.regNo || matchedData.patientId || testId;
+
+        if (pName) setPatientName(pName);
+        if (pPhone) {
+          setPhoneNumber(pPhone);
+          setCheckedPhone(pPhone.replace(/\D/g, '').slice(-10));
+        }
+        if (pEmail) setEmailAddress(pEmail);
+        if (pDiseases) setDiseases(pDiseases);
+        if (pBranch && CLINIC_BRANCHES.includes(pBranch)) {
+          setSelectedBranch(pBranch);
+        }
+        if (pDoctor) {
+          setSelectedDoctor(pDoctor);
+        }
+        setMarketingSource('Old Patient');
+
+        setPatientData({
+          phone: pPhone || phoneNumber,
+          fullName: pName,
+          patientName: pName,
+          patientId: matchedId || matchedData.id || '',
+          regID: reg,
+          registrationId: reg,
+          source: 'Old Patient',
+          patientType: 'revisit',
+          isNewPatient: false,
+          isExistingProfile: true,
+          homeBranch: pBranch,
+          branchName: pBranch
+        });
+
+        setFoundProfileInfo({
+          name: pName,
+          phone: pPhone,
+          branch: pBranch,
+          regId: reg,
+          docId: matchedId
+        });
+        setManualRegId(reg);
+        setRegIdValid(true);
+        setRegIdError('');
+      } else {
+        // Not in database -> Valid as new manual registration ID
+        setFoundProfileInfo(null);
+        setRegIdValid(true);
+        setRegIdError('');
+      }
+    } catch (e) {
+      console.warn('Profile lookup error:', e);
+      setRegIdValid(true);
+    } finally {
+      setIsCheckingRegId(false);
+    }
+  }, [phoneNumber, patientName]);
+
+  // Auto-search profile when manualRegId is entered (debounce 450ms)
+  useEffect(() => {
+    if (!isRebackMode || !manualRegId.trim() || manualRegId.trim().length < 3) return;
+    if (foundProfileInfo && foundProfileInfo.regId === manualRegId.trim().toUpperCase()) return;
+
+    const timer = setTimeout(() => {
+      triggerProfileLookup(manualRegId);
+    }, 450);
+
+    return () => clearTimeout(timer);
+  }, [manualRegId, isRebackMode, foundProfileInfo, triggerProfileLookup]);
+
+  // Auto-populate when initialPatient is passed via navigation
+  useEffect(() => {
+    if (!initialPatient) return;
+    const pName = initialPatient.fullName || initialPatient.patientName || initialPatient.name || '';
+    const pPhone = initialPatient.phone || initialPatient.phoneNumber || initialPatient.mobile || '';
+    const pEmail = initialPatient.email || initialPatient.emailAddress || '';
+    const pDiseases = initialPatient.diseases || initialPatient.subject || initialPatient.symptoms || '';
+    const pBranch = initialPatient.branchName || initialPatient.branch || initialPatient.targetBranch || '';
+    const pDoctor = initialPatient.doctorName || initialPatient.doctor || '';
+    const reg = String(initialPatient.registrationId || initialPatient.regId || initialPatient.regNo || initialPatient.patientId || '').trim().toUpperCase();
+
+    if (pName) setPatientName(pName);
+    if (pPhone) setPhoneNumber(pPhone);
+    if (pEmail) setEmailAddress(pEmail);
+    if (pDiseases) setDiseases(pDiseases);
+    if (pBranch && CLINIC_BRANCHES.includes(pBranch)) setSelectedBranch(pBranch);
+    if (pDoctor) setSelectedDoctor(pDoctor);
+    setMarketingSource('Old Patient');
+
+    if (reg) {
+      setManualRegId(reg);
+      setRegIdValid(true);
+      setRegIdError('');
+      setFoundProfileInfo({
+        name: pName,
+        phone: pPhone,
+        branch: pBranch,
+        regId: reg
+      });
+    }
+
+    setPatientData(prev => ({
+      ...prev,
+      patientId: initialPatient.id || initialPatient.patientDocId || prev.patientId,
+      fullName: pName || prev.fullName,
+      patientName: pName || prev.patientName,
+      phone: pPhone || prev.phone,
+      regID: reg || prev.regID,
+      registrationId: reg || prev.registrationId,
+      source: 'Old Patient',
+      patientType: 'revisit',
+      isNewPatient: false,
+      isExistingProfile: true,
+      homeBranch: pBranch || prev.homeBranch,
+      branchName: pBranch || prev.branchName
+    }));
+  }, [initialPatient]);
+
   const [existingProfilesList, setExistingProfilesList] = useState<any[]>([]);
   const [checkedPhone, setCheckedPhone] = useState('');
   const [bypassPhoneCheck, setBypassPhoneCheck] = useState(false);
@@ -721,7 +1023,7 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
       const pName = data.fullName || data.patientName || data.name || data.patient_name || data.patient || data.patient_fullName || data.displayName || '';
       const docPhone = data.phone || data.patientPhone || data.phoneNumber || data.mobile || data.contact || data.contactNumber || data.mobileNumber || data.tel || '';
       const cleanDocPhone = String(docPhone).replace(/\D/g, '').slice(-10);
-      if (pName && cleanDocPhone === clean) {
+      if (cleanDocPhone === clean) {
         const rawReg = data.regNo || data.registrationId || data.registration_id || data.regId || data.regID || data.patientId || data.uhid || data.customId || data.id;
         const originalBranch = data.branchName || data.branch || data.targetBranch || '';
         let regId = '';
@@ -730,7 +1032,7 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
           regId = rawReg.trim().toUpperCase();
         }
 
-        const normalizedName = pName.trim().replace(/^(mr|mrs|ms|dr|master)\.?\s+/i, '').trim().toLowerCase();
+        const normalizedName = (pName || 'Patient').trim().replace(/^(mr|mrs|ms|dr|master)\.?\s+/i, '').trim().toLowerCase();
         const personKey = `${normalizedName}_${cleanDocPhone}`;
         if (!profilesMap.has(personKey)) {
           if (!regId) {
@@ -739,12 +1041,14 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
           }
           profilesMap.set(personKey, {
             id: docId,
-            fullName: pName,
+            fullName: pName || 'Patient',
             registrationId: regId,
             regNo: data.regNo || regId,
             phone: docPhone || clean,
             gender: data.gender || '',
             age: data.age || '',
+            diseases: data.diseases || data.subject || data.symptoms || data.problem || '',
+            email: data.email || data.emailAddress || '',
             source: 'Old Patient',
             patientType: 'revisit',
             isNewPatient: false,
@@ -765,6 +1069,12 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
           }
           if (!existing.gender && data.gender) existing.gender = data.gender;
           if (!existing.age && data.age) existing.age = data.age;
+          if (!existing.diseases && (data.diseases || data.subject || data.symptoms || data.problem)) {
+            existing.diseases = data.diseases || data.subject || data.symptoms || data.problem;
+          }
+          if (!existing.email && (data.email || data.emailAddress)) {
+            existing.email = data.email || data.emailAddress;
+          }
         }
       }
     };
@@ -791,10 +1101,11 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
           console.warn('[Phone Query] Collection query error:', err);
           return { docs: [] };
         }),
-        new Promise(res => setTimeout(() => res({ docs: [] }), 2500))
+        new Promise(res => setTimeout(() => res({ docs: [] }), 6000))
       ]);
 
-      const phoneVariants = Array.from(new Set([
+      const cleanNum = Number(clean);
+      const phoneVariants: (string | number)[] = Array.from(new Set([
         clean,
         `+91${clean}`,
         `+91 ${clean}`,
@@ -803,18 +1114,40 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
         `${clean.slice(0, 5)} ${clean.slice(5)}`,
         `+91 ${clean.slice(0, 5)} ${clean.slice(5)}`
       ])).filter(Boolean);
+      if (!isNaN(cleanNum)) {
+        phoneVariants.push(cleanNum);
+      }
 
       try {
-        const queryPromises = [
+        const queryPromises: Promise<any>[] = [
+          // allpatients
           safeQuery(query(collection(activeDb, 'allpatients'), where('phone', 'in', phoneVariants), limit(25))),
+          safeQuery(query(collection(activeDb, 'allpatients'), where('phoneNumber', 'in', phoneVariants), limit(25))),
           safeQuery(query(collection(activeDb, 'allpatients'), where('patientPhone', 'in', phoneVariants), limit(25))),
+          safeQuery(query(collection(activeDb, 'allpatients'), where('mobile', 'in', phoneVariants), limit(25))),
+
+          // patients
           safeQuery(query(collection(activeDb, 'patients'), where('phone', 'in', phoneVariants), limit(25))),
+          safeQuery(query(collection(activeDb, 'patients'), where('phoneNumber', 'in', phoneVariants), limit(25))),
           safeQuery(query(collection(activeDb, 'patients'), where('patientPhone', 'in', phoneVariants), limit(25))),
+          safeQuery(query(collection(activeDb, 'patients'), where('mobile', 'in', phoneVariants), limit(25))),
+
+          // appointments
           safeQuery(query(collection(activeDb, 'appointments'), where('phone', 'in', phoneVariants), limit(25))),
-          safeQuery(query(collection(activeDb, 'appointments'), where('patientPhone', 'in', phoneVariants), limit(25))),
           safeQuery(query(collection(activeDb, 'appointments'), where('phoneNumber', 'in', phoneVariants), limit(25))),
+          safeQuery(query(collection(activeDb, 'appointments'), where('patientPhone', 'in', phoneVariants), limit(25))),
+
+          // patient_profiles
           safeQuery(query(collection(activeDb, 'patient_profiles'), where('phone', 'in', phoneVariants), limit(25)))
         ];
+
+        if (!isNaN(cleanNum)) {
+          queryPromises.push(
+            safeQuery(query(collection(activeDb, 'allpatients'), where('phone', '==', cleanNum), limit(10))),
+            safeQuery(query(collection(activeDb, 'patients'), where('phone', '==', cleanNum), limit(10))),
+            safeQuery(query(collection(activeDb, 'appointments'), where('phone', '==', cleanNum), limit(10)))
+          );
+        }
 
         const snapshots = await Promise.all(queryPromises);
         snapshots.forEach((snap: any) => {
@@ -835,21 +1168,36 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
   // END PROFILE FETCH BY PHONE
 
   // START PHONE HANDLERS AND PROFILE SELECTION
-  const handleManualPhoneCheck = async (phoneVal: string) => {
+  const handleManualPhoneCheck = async (phoneVal: string, isAuto: boolean = false) => {
     const clean = phoneVal.replace(/\D/g, '').slice(-10);
     if (clean.length < 10) {
-      Alert.alert("Invalid Phone", "Please enter a 10-digit mobile number.");
+      if (!isAuto) Alert.alert("Invalid Phone", "Please enter a 10-digit mobile number.");
       return;
     }
     setCheckingProfilesLoading(true);
     try {
       const list = await findProfilesByPhone(phoneVal);
       if (list.length > 0) {
+        setMarketingSource('Old Patient');
         setExistingProfilesList(list);
         setCheckedPhone(clean);
-        setExistingProfilesModalVisible(true);
+
+        if (list.length === 1) {
+          handleSelectExistingProfile(list[0]);
+        } else {
+          setPatientData(prev => ({
+            ...prev,
+            source: 'Old Patient',
+            patientType: 'revisit',
+            isNewPatient: false,
+            isExistingProfile: true
+          }));
+          setExistingProfilesModalVisible(true);
+        }
       } else {
-        Alert.alert("No Profiles Found", `No existing patient profiles found for +91 ${clean}.`);
+        if (!isAuto) {
+          Alert.alert("No Profiles Found", `No existing patient profiles found for +91 ${clean}.`);
+        }
       }
     } catch (err) {
       console.error("Manual check error:", err);
@@ -866,22 +1214,63 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
 
     const clean = text.replace(/\D/g, '').slice(-10);
     if (clean.length === 10) {
-      handleManualPhoneCheck(text);
+      const storePool = receptionDataStore.getAllCollectionsPool() || [];
+      const isKnown = storePool.some(p => {
+        const pPhone = String(p.phone || p.patientPhone || p.phoneNumber || p.mobile || '').replace(/\D/g, '').slice(-10);
+        return pPhone === clean;
+      });
+      if (isKnown) {
+        setMarketingSource('Old Patient');
+        setPatientData(prev => ({
+          ...prev,
+          source: 'Old Patient',
+          patientType: 'revisit',
+          isNewPatient: false,
+          isExistingProfile: true
+        }));
+      }
+      handleManualPhoneCheck(text, true);
+    } else {
+      if (!patientData.isExistingProfile && marketingSource === 'Old Patient') {
+        setMarketingSource('Select Source');
+        setPatientData(prev => ({ ...prev, source: 'Select Source' }));
+      }
     }
   };
 
   // Populate appointment form when user selects an existing profile
   const handleSelectExistingProfile = (prof: any) => {
     setPatientName(prof.fullName);
-    setPhoneNumber(prof.phone || (patientData.phone || phoneNumber));
+    const pPhone = prof.phone || (patientData.phone || phoneNumber);
+    setPhoneNumber(pPhone);
     setMarketingSource('Old Patient');
+    if (prof.diseases) setDiseases(prof.diseases);
+    if (prof.email) setEmailAddress(prof.email);
+    if (prof.branchName && CLINIC_BRANCHES.includes(prof.branchName)) {
+      setSelectedBranch(prof.branchName);
+    }
+
+    const reg = String(prof.registrationId || prof.regNo || '').trim().toUpperCase();
+    if (reg) {
+      setManualRegId(reg);
+      setRegIdValid(true);
+      setRegIdError('');
+      setFoundProfileInfo({
+        name: prof.fullName,
+        phone: pPhone,
+        branch: prof.branchName || '',
+        regId: reg
+      });
+    }
+
     setPatientData(prev => ({
       ...prev,
       patientId: prof.id,
       fullName: prof.fullName,
       patientName: prof.fullName,
-      regID: prof.registrationId || prof.regNo || prev.regID,
-      registrationId: prof.registrationId || prof.regNo || prev.registrationId,
+      phone: pPhone,
+      regID: reg || prev.regID,
+      registrationId: reg || prev.registrationId,
       source: 'Old Patient',
       patientType: 'revisit',
       isNewPatient: false,
@@ -894,6 +1283,34 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
   };
   // END HANDLERS
 
+  // Live reactive check: whenever phoneNumber reaches 10 digits, if found in any patient records, auto-set Marketing Source to 'Old Patient'
+  useEffect(() => {
+    const raw = patientData.phone || phoneNumber || '';
+    const clean = raw.replace(/\D/g, '').slice(-10);
+    if (clean.length === 10) {
+      const storePool = receptionDataStore.getAllCollectionsPool() || [];
+      const isKnown = storePool.some(p => {
+        const pPhone = String(p.phone || p.patientPhone || p.phoneNumber || p.mobile || '').replace(/\D/g, '').slice(-10);
+        return pPhone === clean;
+      });
+      if (isKnown) {
+        setMarketingSource('Old Patient');
+        setPatientData(prev => {
+          if (prev.source !== 'Old Patient') {
+            return {
+              ...prev,
+              source: 'Old Patient',
+              patientType: 'revisit',
+              isNewPatient: false,
+              isExistingProfile: true
+            };
+          }
+          return prev;
+        });
+      }
+    }
+  }, [phoneNumber, patientData.phone]);
+
   // Section 2: Appointment Information
   const getTodayFormatted = () => {
     const today = new Date();
@@ -903,7 +1320,15 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
     return `${d}-${m}-${y}`;
   };
 
-  const [appointmentDate, setAppointmentDate] = useState(getTodayFormatted);
+  const getYesterdayFormatted = () => {
+    const yesterday = new Date(Date.now() - 86400000);
+    const d = String(yesterday.getDate()).padStart(2, '0');
+    const m = String(yesterday.getMonth() + 1).padStart(2, '0');
+    const y = yesterday.getFullYear();
+    return `${d}-${m}-${y}`;
+  };
+
+  const [appointmentDate, setAppointmentDate] = useState(() => isRebackMode ? getYesterdayFormatted() : getTodayFormatted());
   const [selectedDoctor, setSelectedDoctor] = useState('');
   const [selectedTimeSlot, setSelectedTimeSlot] = useState('');
   const [clockModalOpen, setClockModalOpen] = useState(false);
@@ -975,6 +1400,10 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
     setPatientSearchTerm('');
     setDebouncedSearchTerm('');
     setShowSuggestions(false);
+    setManualRegId('');
+    setFoundProfileInfo(null);
+    setRegIdError('');
+    setRegIdValid(false);
     setPatientData({ phone: '', fullName: '', patientName: '', patientId: '', regID: '', source: '' });
     setDraftRestored(false);
     setHasDraft(false);
@@ -1182,17 +1611,6 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
     }
   };
 
-  // Handle Android BackHandler to trigger instant direct go back
-  useEffect(() => {
-    const onBackPress = () => {
-      handleDirectGoBack();
-      return true;
-    };
-
-    const backSubscription = BackHandler.addEventListener('hardwareBackPress', onBackPress);
-    return () => backSubscription.remove();
-  }, [onBack, onNavigate]);
-
   // Firestore Live Patient History Collections (appointments, patients & allpatients) with 0ms Instant Device Cache
   const [existingAppointments, setExistingAppointments] = useState<any[]>(() => {
     const storeAppts = receptionDataStore.getAppointments();
@@ -1203,7 +1621,6 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
     const storePool = receptionDataStore.getAllCollectionsPool();
     return storePool.length > 0 ? storePool : GLOBAL_MOBILE_ALLPATIENTS_CACHE;
   });
-
   // 1. Instant Zero-Network Data Synchronization via Centralized receptionDataStore
   useEffect(() => {
     receptionDataStore.startListeners();
@@ -1236,8 +1653,10 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
   }, [currentBranch]);
 
   // Deduplicated Patient History Database
+  // Deduplicated Patient History Database
   interface PatientRecordItem {
     id: string;
+    regId: string;
     name: string;
     phone: string;
     email: string;
@@ -1247,7 +1666,55 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
     phoneLower: string;
   }
 
-  const patientSuggestions: PatientRecordItem[] = [];
+  // Live filter patient suggestions based on debouncedSearchTerm (matches Name, Phone, and Profile/Registration ID)
+  const patientSuggestions = useMemo<PatientRecordItem[]>(() => {
+    const queryStr = (debouncedSearchTerm || '').trim().toLowerCase();
+    if (queryStr.length < 2) return [];
+
+    const digitsOnly = queryStr.replace(/\D/g, '');
+    const pool = receptionDataStore.getAllCollectionsPool() || [];
+    const appts = receptionDataStore.getAppointments() || [];
+    const combined = [...pool, ...appts];
+
+    const seenKeys = new Set<string>();
+    const results: PatientRecordItem[] = [];
+
+    for (const p of combined) {
+      if (!p) continue;
+      const rawName = String(p.patientName || p.fullName || p.name || '').trim();
+      const rawPhone = String(p.phone || p.phoneNumber || p.mobile || '').replace(/\D/g, '').slice(-10);
+      const regId = String(p.registrationId || p.regId || p.regNo || p.patientId || p.uhid || p.id || '').trim();
+      if (!rawName && rawPhone.length < 10 && !regId) continue;
+
+      const dedupeKey = `${rawName.toLowerCase()}_${rawPhone}_${regId.toLowerCase()}`;
+      if (seenKeys.has(dedupeKey)) continue;
+      seenKeys.add(dedupeKey);
+
+      const nameLower = rawName.toLowerCase();
+      const idLower = regId.toLowerCase();
+
+      const nameMatches = nameLower.includes(queryStr);
+      const phoneMatches = digitsOnly.length >= 2 && rawPhone.includes(digitsOnly);
+      const idMatches = idLower.includes(queryStr);
+
+      if (nameMatches || phoneMatches || idMatches) {
+        results.push({
+          id: p.id || regId || rawPhone,
+          regId: regId || p.id,
+          name: rawName || 'Patient',
+          phone: rawPhone,
+          email: p.email || p.emailAddress || '',
+          diseases: p.diseases || p.subject || p.symptoms || '',
+          branch: p.branchName || p.branch || '',
+          nameLower,
+          phoneLower: rawPhone
+        });
+      }
+      if (results.length >= 15) break;
+    }
+
+    return results;
+  }, [debouncedSearchTerm]);
 
   const handleSelectPatientSuggestion = (item: PatientRecordItem) => {
     setPatientName(item.name || '');
@@ -1255,13 +1722,35 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
     setEmailAddress(item.email || '');
     setDiseases(item.diseases || '');
     setMarketingSource('Old Patient');
+    if (item.branch && CLINIC_BRANCHES.includes(item.branch)) {
+      setSelectedBranch(item.branch);
+    }
+    const reg = (item.regId || item.id || '').trim().toUpperCase();
+    if (reg) {
+      setManualRegId(reg);
+      setRegIdValid(true);
+      setRegIdError('');
+      setFoundProfileInfo({
+        name: item.name,
+        phone: item.phone,
+        branch: item.branch,
+        regId: reg
+      });
+    }
     setPatientData(prev => ({
       ...prev,
       patientId: item.id,
       fullName: item.name,
       patientName: item.name,
       phone: item.phone,
-      source: 'Old Patient'
+      regID: reg || prev.regID,
+      registrationId: reg || prev.registrationId,
+      source: 'Old Patient',
+      patientType: 'revisit',
+      isNewPatient: false,
+      isExistingProfile: true,
+      homeBranch: item.branch || prev.homeBranch,
+      branchName: item.branch || prev.branchName
     }));
     setPatientSearchTerm(item.name || item.phone || '');
     setDebouncedSearchTerm('');
@@ -1819,6 +2308,80 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
   const [showBookingConfirmModal, setShowBookingConfirmModal] = useState(false);
   const [confirmedBooking, setConfirmedBooking] = useState<any>(null);
 
+  // Native Android Hardware / Gesture Back Navigation Handler
+  useEffect(() => {
+    if (!isActive) return;
+
+    const onHardwareBack = () => {
+      // 1. Close internal modals first if open
+      if (existingProfilesModalVisible) {
+        setExistingProfilesModalVisible(false);
+        return true;
+      }
+      if (calendarModalOpen) {
+        setCalendarModalOpen(false);
+        return true;
+      }
+      if (clockModalOpen) {
+        setClockModalOpen(false);
+        return true;
+      }
+      if (showBookingConfirmModal) {
+        setShowBookingConfirmModal(false);
+        return true;
+      }
+
+      // 2. Close open dropdowns / suggestion lists if open
+      if (showSuggestions) {
+        setShowSuggestions(false);
+        return true;
+      }
+      if (branchExpanded) {
+        setBranchExpanded(false);
+        return true;
+      }
+      if (marketingExpanded) {
+        setMarketingExpanded(false);
+        return true;
+      }
+      if (modeExpanded) {
+        setModeExpanded(false);
+        return true;
+      }
+      if (doctorExpanded) {
+        setDoctorExpanded(false);
+        return true;
+      }
+
+      // 3. Otherwise pop cleanly back to Main Dashboard
+      if (onBack) {
+        onBack();
+        return true;
+      }
+      if (onNavigate) {
+        onNavigate('reception_dashboard');
+        return true;
+      }
+      return true;
+    };
+
+    const backSub = BackHandler.addEventListener('hardwareBackPress', onHardwareBack);
+    return () => backSub.remove();
+  }, [
+    isActive,
+    existingProfilesModalVisible,
+    calendarModalOpen,
+    clockModalOpen,
+    showBookingConfirmModal,
+    showSuggestions,
+    branchExpanded,
+    marketingExpanded,
+    modeExpanded,
+    doctorExpanded,
+    onBack,
+    onNavigate,
+  ]);
+
   const monthNames = [
     'January', 'February', 'March', 'April', 'May', 'June',
     'July', 'August', 'September', 'October', 'November', 'December'
@@ -1905,16 +2468,45 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
         return;
       }
 
-      let generatedRegId = patientData.regID || patientData.registrationId || patientData.patientId;
+      // REBACK MODE VALIDATIONS
+      if (isRebackMode) {
+        if (!manualRegId.trim()) {
+          Alert.alert('Registration ID Required', 'Please enter a manual Registration ID or Profile ID for Reback Appointment.');
+          setIsSubmitting(false);
+          return;
+        }
+
+        // Verify date is strictly in the past
+        const parts = appointmentDate.split('-');
+        if (parts.length === 3) {
+          const day = parseInt(parts[0], 10);
+          const month = parseInt(parts[1], 10) - 1;
+          const year = parseInt(parts[2], 10);
+          const bookingDateObj = new Date(year, month, day, 23, 59, 59);
+          const todayStart = new Date();
+          todayStart.setHours(0, 0, 0, 0);
+
+          if (bookingDateObj.getTime() >= todayStart.getTime()) {
+            Alert.alert('Past Date Required', 'Reback Appointment only allows previous / past expired dates (not today or future dates).');
+            setIsSubmitting(false);
+            return;
+          }
+        }
+      }
+
+      let generatedRegId = isRebackMode
+        ? (foundProfileInfo?.regId || manualRegId.trim().toUpperCase())
+        : (patientData.regID || patientData.registrationId || patientData.patientId);
+
       const isAutoDocId = typeof generatedRegId === 'string' && /^[a-zA-Z0-9]{20,32}$/.test(generatedRegId.trim());
-      if (!generatedRegId || typeof generatedRegId !== 'string' || generatedRegId.trim().length === 0 || isAutoDocId) {
+      if (!isRebackMode && (!generatedRegId || typeof generatedRegId !== 'string' || generatedRegId.trim().length === 0 || isAutoDocId)) {
         generatedRegId = await generateRegistrationId(selectedBranch);
       }
 
       const newDocRef = doc(collection(activeDb, 'appointments'));
       const docId = newDocRef.id;
 
-      const isExplicitNewPatient = (patientData.source !== 'Old Patient' && marketingSource !== 'Old Patient' && !patientData.patientId);
+      const isExplicitNewPatient = (patientData.source !== 'Old Patient' && marketingSource !== 'Old Patient' && !patientData.patientId && !foundProfileInfo);
 
       const effectiveBranch = (selectedBranch && selectedBranch !== 'All Branches' && selectedBranch !== 'Select Branch')
         ? selectedBranch
@@ -1944,56 +2536,95 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
         appointmentTime: selectedTimeSlot || '10:00 AM',
         time: selectedTimeSlot || '10:00 AM',
         timeSlot: selectedTimeSlot || '10:00 AM',
-        status: 'waiting',
+        status: isRebackMode ? 'completed' : 'waiting',
+        isReback: isRebackMode,
+        rebackVisit: isRebackMode,
+        historicalVisitDate: isRebackMode ? appointmentDate : undefined,
         isNewPatient: isExplicitNewPatient,
         patientType: isExplicitNewPatient ? 'new' : 'revisit',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
 
-      await Promise.all([
-        setDoc(newDocRef, appPayload),
-        setDoc(doc(activeDb, 'allpatients', docId), appPayload).catch(() => { }),
-        setDoc(doc(activeDb, 'patients', docId), appPayload).catch(() => { })
-      ]);
+      // For Reback Appointments: strictly save to appointments ONLY!
+      // DO NOT call setDoc on allpatients or patients to prevent duplicate profile creation!
+      const writes: Promise<any>[] = [setDoc(newDocRef, appPayload)];
+      if (!isRebackMode && isExplicitNewPatient) {
+        writes.push(setDoc(doc(activeDb, 'allpatients', docId), appPayload).catch(() => { }));
+        writes.push(setDoc(doc(activeDb, 'patients', docId), appPayload).catch(() => { }));
+      }
+      await Promise.all(writes);
 
-      // Trigger Leonas WhatsApp Booking Notification
-      sendBookingWhatsAppNotification({
-        patientName,
-        phone: phoneNumber,
-        date: appointmentDate,
-        time: selectedTimeSlot || '10:00 AM',
-        doctorName: selectedDoctor,
-        branch: effectiveBranch
-      }).catch(err => console.error('WhatsApp booking notification error:', err));
+      // Disable WhatsApp, SMS, and FCM notifications for Reback historical entries
+      if (!isRebackMode) {
+        // Trigger Leonas WhatsApp Booking Notification
+        sendBookingWhatsAppNotification({
+          patientName,
+          phone: phoneNumber,
+          date: appointmentDate,
+          time: selectedTimeSlot || '10:00 AM',
+          doctorName: selectedDoctor,
+          branch: effectiveBranch
+        }).catch(err => console.error('WhatsApp booking notification error:', err));
 
-      // Trigger SMS Booking Confirmation (DLT Template)
-      sendBookingSMS(
-        phoneNumber,
-        patientName,
-        selectedDoctor,
-        appointmentDate,
-        selectedTimeSlot || '10:00 AM',
-        effectiveBranch,
-        false
-      ).catch(err => console.warn('SMS booking notification notice:', err));
+        // Trigger SMS Booking Confirmation (DLT Template)
+        sendBookingSMS(
+          phoneNumber,
+          patientName,
+          selectedDoctor,
+          appointmentDate,
+          selectedTimeSlot || '10:00 AM',
+          effectiveBranch,
+          false
+        ).catch(err => console.warn('SMS booking notification notice:', err));
 
-      // Trigger FCM Push Notification and 10-day Firestore retention cleanup
-      createBookingNotificationInFirestore({
-        patientName,
-        appointmentTime: selectedTimeSlot || '10:00 AM',
-        appointmentDate,
-        branch: effectiveBranch,
-        doctorName: selectedDoctor,
-        consultationMode
-      }).catch(err => console.warn('FCM booking notification notice:', err));
+        // Trigger FCM Push Notification and 10-day Firestore retention cleanup
+        createBookingNotificationInFirestore({
+          patientName,
+          appointmentTime: selectedTimeSlot || '10:00 AM',
+          appointmentDate,
+          branch: effectiveBranch,
+          doctorName: selectedDoctor,
+          consultationMode
+        }).catch(err => console.warn('FCM booking notification notice:', err));
+      }
 
       // Complete Form & Search Reset
       await clearFormAndDraft();
       Keyboard.dismiss();
 
-      // Navigate back cleanly to dashboard (NO in-app popup!)
-      if (onNavigate) {
+      // IF REBACK MODE: IMMEDIATELY NAVIGATE TO PATIENT FILE SCREEN
+      if (isRebackMode) {
+        const fullRebackPatient = {
+          ...appPayload,
+          id: docId,
+          appointmentId: docId,
+          patientDocId: patientData.patientId || foundProfileInfo?.docId || docId,
+          regId: generatedRegId || patientData.regID || patientData.registrationId || manualRegId,
+          registrationId: generatedRegId || patientData.regID || patientData.registrationId || manualRegId,
+          patientName: patientName,
+          phone: phoneNumber,
+          phoneNumber: phoneNumber,
+          branch: effectiveBranch,
+          branchName: effectiveBranch,
+          doctorName: selectedDoctor,
+          doctor: selectedDoctor,
+          appointmentDate: appointmentDate,
+          date: appointmentDate,
+          isReback: true,
+          rebackVisit: true,
+          status: 'completed',
+          paymentStatus: 'pending',
+          feeCollectionNeeded: true
+        };
+
+        if (onNavigate) {
+          onNavigate('reception_patient_file', fullRebackPatient);
+        } else if (onBack) {
+          onBack();
+        }
+      } else if (onNavigate) {
+        // Navigate back cleanly to dashboard for normal booking
         onNavigate('reception_dashboard');
       } else if (onBack) {
         onBack();
@@ -2083,15 +2714,165 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
           <View style={styles.cardHeaderLine} />
         </View>
 
+        {/* REBACK MODE: MANUAL REGISTRATION ID INPUT WITH INSTANT PROFILE LOOKUP */}
+        {isRebackMode && (
+          <View style={{ marginBottom: 14, position: 'relative', zIndex: 1200 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+              <Text style={styles.fieldLabel}>
+                Registration ID / Profile ID <Text style={{ color: '#dc2626' }}>*</Text>
+              </Text>
+              {manualRegId.trim().length > 0 && (
+                <TouchableOpacity
+                  onPress={() => triggerProfileLookup(manualRegId)}
+                  disabled={isCheckingRegId}
+                >
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: isCheckingRegId ? '#94a3b8' : '#0284c7' }}>
+                    {isCheckingRegId ? 'Searching...' : 'Fetch Profile'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+            <View style={[
+              styles.inputBox,
+              { flexDirection: 'row', alignItems: 'center' },
+              regIdError ? { borderColor: '#ef4444', backgroundColor: '#fef2f2' } : (foundProfileInfo || regIdValid) ? { borderColor: '#22c55e', backgroundColor: '#f0fdf4' } : {}
+            ]}>
+              <Ionicons
+                name="card-outline"
+                size={16}
+                color={regIdError ? '#ef4444' : (foundProfileInfo || regIdValid) ? '#16a34a' : '#64748b'}
+                style={{ marginRight: 8 }}
+              />
+              <TextInput
+                style={[styles.inputText, { flex: 1, height: '100%', textTransform: 'uppercase', fontWeight: '700', paddingVertical: 0 }]}
+                placeholder="e.g. SPH-KPHB-1052, Profile ID, or Phone"
+                placeholderTextColor="#94a3b8"
+                autoCapitalize="characters"
+                value={manualRegId}
+                onFocus={() => {
+                  if (manualRegId.trim().length >= 2) {
+                    setDebouncedSearchTerm(manualRegId);
+                    setShowRegIdSuggestions(true);
+                  }
+                }}
+                onChangeText={(val) => {
+                  const cleaned = val.trim().toUpperCase();
+                  setManualRegId(cleaned);
+                  setRegIdError('');
+                  if (foundProfileInfo && foundProfileInfo.regId !== cleaned) {
+                    setFoundProfileInfo(null);
+                  }
+                  if (!cleaned) {
+                    setRegIdValid(false);
+                    setShowRegIdSuggestions(false);
+                  } else {
+                    setShowRegIdSuggestions(true);
+                    handleSearchChange(cleaned);
+                  }
+                }}
+                onBlur={() => {
+                  setTimeout(() => setShowRegIdSuggestions(false), 250);
+                  if (manualRegId.trim() && !foundProfileInfo) {
+                    triggerProfileLookup(manualRegId);
+                  }
+                }}
+                onSubmitEditing={() => {
+                  if (manualRegId.trim()) triggerProfileLookup(manualRegId);
+                }}
+              />
+              {isCheckingRegId ? (
+                <ActivityIndicator size="small" color="#0284c7" style={{ marginLeft: 6 }} />
+              ) : (foundProfileInfo || regIdValid) ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginLeft: 6 }}>
+                  <Ionicons name="checkmark-circle" size={18} color="#16a34a" />
+                  <TouchableOpacity
+                    onPress={() => triggerProfileLookup(manualRegId)}
+                    style={{ padding: 4 }}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <Ionicons name="search" size={16} color="#64748b" />
+                  </TouchableOpacity>
+                </View>
+              ) : manualRegId.trim().length > 0 ? (
+                <TouchableOpacity
+                  onPress={() => triggerProfileLookup(manualRegId)}
+                  style={{ padding: 4, marginLeft: 6 }}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons name="search" size={18} color="#0284c7" />
+                </TouchableOpacity>
+              ) : null}
+            </View>
 
+            {/* Suggestions Dropdown for Reg ID / Profile ID Search */}
+            {showRegIdSuggestions && patientSuggestions.length > 0 && (
+              <PatientSuggestionsDropdown
+                suggestions={patientSuggestions}
+                onSelect={(item) => {
+                  handleSelectPatientSuggestion(item);
+                  setShowRegIdSuggestions(false);
+                }}
+              />
+            )}
+
+            {/* Profile Found Card */}
+            {foundProfileInfo ? (
+              <View style={{
+                backgroundColor: '#f0fdf4',
+                borderColor: '#bbf7d0',
+                borderWidth: 1,
+                borderRadius: 8,
+                padding: 10,
+                marginTop: 6
+              }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
+                    <Ionicons name="checkmark-circle" size={16} color="#16a34a" />
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: '#166534' }} numberOfLines={1}>
+                      Profile Found: {foundProfileInfo.name}
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setFoundProfileInfo(null);
+                      setManualRegId('');
+                      setPatientName('');
+                      setPhoneNumber('');
+                      setEmailAddress('');
+                      setDiseases('');
+                      setRegIdValid(false);
+                      setRegIdError('');
+                    }}
+                    style={{ paddingHorizontal: 6, paddingVertical: 2 }}
+                  >
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: '#dc2626' }}>Clear</Text>
+                  </TouchableOpacity>
+                </View>
+                <Text style={{ fontSize: 11.5, color: '#15803d', marginTop: 3 }}>
+                  Reg ID: <Text style={{ fontWeight: '700' }}>{foundProfileInfo.regId}</Text>
+                  {foundProfileInfo.phone ? ` • Phone: +91 ${foundProfileInfo.phone}` : ''}
+                  {foundProfileInfo.branch ? ` • 📍 ${foundProfileInfo.branch}` : ''}
+                </Text>
+              </View>
+            ) : regIdError ? (
+              <Text style={{ fontSize: 11, color: '#dc2626', fontWeight: '700', marginTop: 4 }}>
+                ⚠️ {regIdError}
+              </Text>
+            ) : (regIdValid && !isCheckingRegId && manualRegId.trim()) ? (
+              <Text style={{ fontSize: 11, color: '#0284c7', fontWeight: '700', marginTop: 4 }}>
+                ✓ New Registration ID (Manual Entry)
+              </Text>
+            ) : null}
+          </View>
+        )}
 
         {/* 2-Column Inputs: Patient Name & Diseases */}
-        <View style={[styles.rowTwoCol, { zIndex: 500 }]}>
+        <View style={[styles.rowTwoCol, { zIndex: (showSuggestions && patientSuggestions.length > 0) ? 1000 : 500 }]}>
           <View style={[styles.colField, { zIndex: 600 }]}>
             <Text style={styles.fieldLabel}>Patient Name</Text>
             <View style={styles.inputBox}>
               <TextInput
-                style={styles.inputText}
+                style={[styles.inputText, { flex: 1, height: '100%', paddingVertical: 0 }]}
                 placeholder="Enter patient's name"
                 placeholderTextColor="#94a3b8"
                 value={patientName}
@@ -2111,7 +2892,7 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
             <Text style={styles.fieldLabel}>Diseases</Text>
             <View style={styles.inputBox}>
               <TextInput
-                style={styles.inputText}
+                style={[styles.inputText, { flex: 1, height: '100%', paddingVertical: 0 }]}
                 placeholder="Enter diseases"
                 placeholderTextColor="#94a3b8"
                 value={diseases}
@@ -2119,6 +2900,17 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
               />
             </View>
           </View>
+
+          {/* Full-width suggestions dropdown spanning both columns to prevent squashing and overlapping */}
+          {showSuggestions && patientSuggestions.length > 0 && (
+            <PatientSuggestionsDropdown
+              suggestions={patientSuggestions}
+              onSelect={(item) => {
+                handleSelectPatientSuggestion(item);
+                setShowSuggestions(false);
+              }}
+            />
+          )}
         </View>
 
         {/* 2-Column Inputs: Phone (+91) & Email Address */}
@@ -2695,7 +3487,9 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
             <MaterialCommunityIcons name="shield-check" size={20} color="#ffffff" />
           )}
           <Text style={styles.confirmBtnText}>
-            {isSubmitting ? 'Booking Appointment...' : 'Confirm Appointment'}
+            {isSubmitting
+              ? (isRebackMode ? 'Booking Reback...' : 'Booking Appointment...')
+              : (isRebackMode ? 'Confirm Reback & Open Patient File' : 'Confirm Appointment')}
           </Text>
         </View>
         {!isSubmitting && <Feather name="arrow-right" size={20} color="#ffffff" />}
@@ -2703,7 +3497,7 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
 
       {/* VISUAL INTERACTIVE CALENDAR DATE PICKER POPUP MODAL WITH MONTH & YEAR SWITCHING */}
       {calendarModalOpen && (
-        <Modal visible={calendarModalOpen} transparent animationType="fade">
+        <Modal visible={calendarModalOpen} transparent animationType="fade" onRequestClose={() => setCalendarModalOpen(false)}>
           <TouchableOpacity style={styles.calendarModalBackdrop} activeOpacity={1} onPress={() => setCalendarModalOpen(false)}>
             <View style={styles.calendarModalContent} onStartShouldSetResponder={() => true}>
 
@@ -2743,17 +3537,37 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
                   const dayStr = `${formattedDay}-${formattedMonth}-${calYear}`;
                   const isSelected = appointmentDate === dayStr;
 
+                  // In reback mode, ONLY past dates before today are allowed
+                  const cellDate = new Date(calYear, calMonth, dayNum, 23, 59, 59);
+                  const todayStart = new Date();
+                  todayStart.setHours(0, 0, 0, 0);
+                  const isPastDate = cellDate.getTime() < todayStart.getTime();
+                  const isDisabled = isRebackMode && !isPastDate;
+
                   return (
                     <View key={dayNum} style={styles.dayCellWrapper}>
                       <TouchableOpacity
-                        style={[styles.dayCell, isSelected && styles.dayCellSelected]}
+                        style={[
+                          styles.dayCell,
+                          isSelected && styles.dayCellSelected,
+                          isDisabled && { opacity: 0.25, backgroundColor: '#f1f5f9' }
+                        ]}
+                        disabled={isDisabled}
                         onPress={() => {
+                          if (isDisabled) {
+                            Alert.alert('Past Dates Only', 'Reback Appointment only allows previous / past expired dates (not today or future dates).');
+                            return;
+                          }
                           setAppointmentDate(dayStr);
                           setCalendarModalOpen(false);
                         }}
                         activeOpacity={0.7}
                       >
-                        <Text style={[styles.dayCellText, isSelected && styles.dayCellTextSelected]}>
+                        <Text style={[
+                          styles.dayCellText,
+                          isSelected && styles.dayCellTextSelected,
+                          isDisabled && { color: '#94a3b8' }
+                        ]}>
                           {dayNum}
                         </Text>
                       </TouchableOpacity>
@@ -2762,20 +3576,35 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
                 })}
               </View>
 
-              {/* Bottom Actions: Today Quick Select & Close */}
+              {/* Bottom Actions: Quick Select & Close */}
               <View style={styles.calendarFooter}>
-                <TouchableOpacity
-                  onPress={() => {
-                    const todayStr = getTodayFormatted();
-                    setAppointmentDate(todayStr);
-                    setCalendarModalOpen(false);
-                  }}
-                  style={styles.calendarTodayBtn}
-                  activeOpacity={0.7}
-                >
-                  <Ionicons name="today-outline" size={14} color="#0284c7" style={{ marginRight: 4 }} />
-                  <Text style={styles.calendarTodayBtnText}>Today</Text>
-                </TouchableOpacity>
+                {!isRebackMode ? (
+                  <TouchableOpacity
+                    onPress={() => {
+                      const todayStr = getTodayFormatted();
+                      setAppointmentDate(todayStr);
+                      setCalendarModalOpen(false);
+                    }}
+                    style={styles.calendarTodayBtn}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="today-outline" size={14} color="#0284c7" style={{ marginRight: 4 }} />
+                    <Text style={styles.calendarTodayBtnText}>Today</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    onPress={() => {
+                      const yestStr = getYesterdayFormatted();
+                      setAppointmentDate(yestStr);
+                      setCalendarModalOpen(false);
+                    }}
+                    style={styles.calendarTodayBtn}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="time-outline" size={14} color="#d97706" style={{ marginRight: 4 }} />
+                    <Text style={[styles.calendarTodayBtnText, { color: '#d97706' }]}>Yesterday</Text>
+                  </TouchableOpacity>
+                )}
 
                 <TouchableOpacity
                   onPress={() => setCalendarModalOpen(false)}
@@ -2919,6 +3748,41 @@ export const BookAppointmentScreen: React.FC<BookAppointmentScreenProps> = ({
 
       {/* END EXISTING PROFILES MODAL */}
 
+      {/* DIRECT REBACK APPOINTMENT COLLECT FEE MODAL (NO RAZORPAY, NO SMS/WHATSAPP) */}
+      {isRebackMode && savedRebackPatientForPayment && (
+        <AppointmentPaymentModal
+          visible={showRebackPaymentModal}
+          onDismiss={() => {
+            setShowRebackPaymentModal(false);
+            if (onNavigate) {
+              onNavigate('reception_dashboard');
+            } else if (onBack) {
+              onBack();
+            }
+          }}
+          selectedPatientForPayment={savedRebackPatientForPayment}
+          onPaymentSuccess={() => {
+            setShowRebackPaymentModal(false);
+            Alert.alert(
+              'Historical Payment Recorded ✓',
+              'Payment record saved to transaction logs without Razorpay or SMS.',
+              [
+                {
+                  text: 'OK',
+                  onPress: () => {
+                    if (onNavigate) {
+                      onNavigate('reception_dashboard');
+                    } else if (onBack) {
+                      onBack();
+                    }
+                  }
+                }
+              ]
+            );
+          }}
+        />
+      )}
+
     </ScrollView>
   );
 };
@@ -3007,13 +3871,14 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   inputBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: '#ffffff',
     borderWidth: 1,
     borderColor: '#cbd5e1',
     borderRadius: 12,
     paddingHorizontal: 12,
     height: 46,
-    justifyContent: 'center',
   },
   inputBoxFixedBranch: {
     flexDirection: 'row',
@@ -3046,6 +3911,9 @@ const styles = StyleSheet.create({
     color: '#258ec8',
   },
   inputText: {
+    flex: 1,
+    height: '100%',
+    paddingVertical: 0,
     fontSize: 12.5,
     color: '#0f172a',
     fontWeight: '500',
@@ -3557,10 +4425,10 @@ const PatientSuggestionRow = React.memo<PatientSuggestionRowProps>(({ item, isLa
         <Text style={{ fontSize: 13.5, fontWeight: '700', color: '#0f172a' }}>
           {item.name || 'Unnamed Patient'}
         </Text>
-        {item.id ? (
+        {(item.regId || item.id) ? (
           <View style={{ backgroundColor: '#e0f2fe', borderWidth: 1, borderColor: '#bae6fd', paddingHorizontal: 6, paddingVertical: 1.5, borderRadius: 6 }}>
             <Text style={{ fontSize: 9.5, fontWeight: '800', color: '#0284c7' }}>
-              🆔 {item.id}
+              🆔 {item.regId || item.id}
             </Text>
           </View>
         ) : null}
@@ -3609,9 +4477,9 @@ const PatientSuggestionsDropdown = React.memo<PatientSuggestionsDropdownProps>((
     <View
       style={{
         position: 'absolute',
-        top: 76,
-        left: -8,
-        right: -8,
+        top: 72,
+        left: 0,
+        right: 0,
         backgroundColor: '#ffffff',
         borderWidth: 1,
         borderColor: '#cbd5e1',
@@ -3620,8 +4488,8 @@ const PatientSuggestionsDropdown = React.memo<PatientSuggestionsDropdownProps>((
         shadowOffset: { width: 0, height: 12 },
         shadowOpacity: 0.18,
         shadowRadius: 18,
-        elevation: 18,
-        zIndex: 9999,
+        elevation: 25,
+        zIndex: 99999,
         maxHeight: 340,
         overflow: 'hidden',
       }}

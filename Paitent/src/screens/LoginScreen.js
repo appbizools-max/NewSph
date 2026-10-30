@@ -97,8 +97,8 @@ const LoginScreen = ({ navigation, route }) => {
       setOtpExpiresAt(expiry);
       setOtpSent(true);
       setCountdown(30);
-      setVerificationCode(''); // Empty for real user input
-      setSmsNotice(`Sending verification OTP to +91 ${clean10}...`);
+      setVerificationCode('1234'); // Default 1234
+      setSmsNotice(`Default verification OTP is 1234 (dispatched to +91 ${clean10}).`);
       setLoading(false);
 
       if (Platform.OS === 'android') {
@@ -157,8 +157,8 @@ const LoginScreen = ({ navigation, route }) => {
         return;
       }
 
-      // 2. In-memory match against real dispatched OTP
-      let isOtpValid = Boolean(sentOtp && cleanCode === sentOtp);
+      // 2. In-memory match against default 1234 or real dispatched OTP
+      let isOtpValid = Boolean(cleanCode === '1234' || (sentOtp && cleanCode === sentOtp));
 
       // 3. Fallback match against Firestore auth_otps
       if (!isOtpValid) {

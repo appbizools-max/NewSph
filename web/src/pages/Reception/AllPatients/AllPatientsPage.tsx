@@ -41,19 +41,42 @@ const getFormattedDateStr = (dateObj: Date): string => {
 const normalizeDateToISO = (dateStr: string): string => {
   if (!dateStr) return '';
   const clean = String(dateStr).trim();
-  if (clean.includes('T')) return clean.split('T')[0];
+  if (clean.includes('T')) {
+    const parsed = new Date(clean);
+    if (!isNaN(parsed.getTime())) {
+      const y = parsed.getFullYear();
+      const m = String(parsed.getMonth() + 1).padStart(2, '0');
+      const d = String(parsed.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+    return clean.split('T')[0];
+  }
   if (clean.includes('/') || (clean.includes('-') && clean.split('-')[0].length <= 2)) {
     const parts = clean.split(/[\/\-]/);
     if (parts.length === 3) {
-      let dd = parts[0].padStart(2, '0');
-      let mm = parts[1].padStart(2, '0');
-      let yyyy = parts[2];
       if (parts[0].length === 4) {
-        yyyy = parts[0];
-        mm = parts[1].padStart(2, '0');
-        dd = parts[2].padStart(2, '0');
+        const yyyy = parts[0];
+        const mm = parts[1].padStart(2, '0');
+        const dd = parts[2].padStart(2, '0');
+        return `${yyyy}-${mm}-${dd}`;
+      } else {
+        const yyyy = parts[2].length === 2 ? `20${parts[2]}` : parts[2];
+        const p0 = parseInt(parts[0], 10);
+        const p1 = parseInt(parts[1], 10);
+        let dd = '';
+        let mm = '';
+        if (p1 > 12) {
+          mm = parts[0].padStart(2, '0');
+          dd = parts[1].padStart(2, '0');
+        } else if (p0 > 12) {
+          dd = parts[0].padStart(2, '0');
+          mm = parts[1].padStart(2, '0');
+        } else {
+          dd = parts[0].padStart(2, '0');
+          mm = parts[1].padStart(2, '0');
+        }
+        return `${yyyy}-${mm}-${dd}`;
       }
-      return `${yyyy}-${mm}-${dd}`;
     }
   }
   return clean;
@@ -79,19 +102,10 @@ const isBranchMatching = (b1: string, b2?: string): boolean => {
   return getBranchShortcut(n1) === getBranchShortcut(n2);
 };
 
-// Seed Fallback Data
-const INITIAL_PATIENTS: PatientRecord[] = [
-  { id: 'PAT-101', name: 'Rajesh Kumar', phone: '+91 98490 12345', age: 38, gender: 'Male', branchName: 'KPHB Branch', appointmentDate: getFormattedDateStr(new Date()), appointmentTime: '10:00 AM', doctorName: 'Dr. Srinivas', status: 'active', regId: 'SPH-KPHB-0101' },
-  { id: 'PAT-102', name: 'Sneha Reddy', phone: '+91 91210 67890', age: 29, gender: 'Female', branchName: 'Nallagandla Branch', appointmentDate: getFormattedDateStr(new Date()), appointmentTime: '11:15 AM', doctorName: 'Dr. Ananya', status: 'follow_up', regId: 'SPH-NALLA-0102' },
-  { id: 'PAT-103', name: 'Venkatesh Rao', phone: '+91 94400 45678', age: 45, gender: 'Male', branchName: 'Dilshuknagar Branch', appointmentDate: getFormattedDateStr(new Date(Date.now() - 86400000)), appointmentTime: '02:30 PM', doctorName: 'Dr. Srinivas', status: 'completed', regId: 'SPH-DSNR-0103' },
-  { id: 'PAT-104', name: 'Ananya Sharma', phone: '+91 99887 11223', age: 31, gender: 'Female', branchName: 'Chandanagar Branch', appointmentDate: getFormattedDateStr(new Date(Date.now() - 86400000)), appointmentTime: '04:00 PM', doctorName: 'Dr. Ramesh', status: 'awaiting_payment', regId: 'SPH-CHNR-0104' },
-  { id: 'PAT-105', name: 'Kiran Verma', phone: '+91 98765 00011', age: 50, gender: 'Male', branchName: 'KPHB Branch', appointmentDate: '2026-09-01', appointmentTime: '11:30 AM', doctorName: 'Dr. Ananya', status: 'completed', regId: 'SPH-KPHB-0105' }
-];
-
 export const AllPatientsPage: React.FC<AllPatientsPageProps> = ({ currentBranch = 'KPHB Branch', onNavigate }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [dateFilterMode, setDateFilterMode] = useState<'today' | 'yesterday' | 'all'>('today');
-  const [patients, setPatients] = useState<PatientRecord[]>(INITIAL_PATIENTS);
+  const [patients, setPatients] = useState<PatientRecord[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isSearchingLive, setIsSearchingLive] = useState(false);
 
@@ -136,6 +150,7 @@ export const AllPatientsPage: React.FC<AllPatientsPageProps> = ({ currentBranch 
       const pName = data.patientName || data.name || data.fullName || 'Patient';
       const regId = data.registrationId || data.regId || data.regNo || data.patientId || id;
       const rawDate = data.appointmentDate || data.date || data.createdAt || todayStr;
+      const isoDate = normalizeDateToISO(String(rawDate));
 
       let status = 'active';
       const s = String(data.status || '').toLowerCase().trim();
@@ -194,14 +209,7 @@ export const AllPatientsPage: React.FC<AllPatientsPageProps> = ({ currentBranch 
         }
       });
 
-      // 4. Include seed fallback matching current branch if empty
-      if (combinedMap.size === 0) {
-        INITIAL_PATIENTS.forEach(seed => {
-          if (!currentBranch || isBranchMatching(seed.branchName, currentBranch)) {
-            combinedMap.set(seed.id, seed);
-          }
-        });
-      }
+
 
       // Sort newest first by appointmentDate / createdAt
       const sortedList = Array.from(combinedMap.values()).sort((a, b) => {
@@ -288,7 +296,7 @@ export const AllPatientsPage: React.FC<AllPatientsPageProps> = ({ currentBranch 
       };
     } catch (e) {
       console.warn('Subscription error:', e);
-      setPatients(INITIAL_PATIENTS.filter(p => !currentBranch || isBranchMatching(p.branchName, currentBranch)));
+      setPatients([]);
       setIsLoading(false);
     }
   }, [currentBranch]);

@@ -11,6 +11,7 @@ import { ManageBranchesScreen } from './ManageBranches/ManageBranchesScreen';
 import { AttendanceRosterScreen } from '../HR/AttendanceRoster/AttendanceRosterScreen';
 import { EmployeeDailyWorksScreen } from '../HR/EmployeeWorks/EmployeeDailyWorksScreen';
 import { BranchCleaningScreen } from './BranchCleaning/BranchCleaningScreen';
+import { AnalyticsRevenueScreen } from './AnalyticsRevenue/AnalyticsRevenueScreen';
 import { createFeeDiscountResponseNotificationInFirestore } from '../../utils/fcmService';
 
 interface AdminScreenProps {
@@ -35,11 +36,12 @@ export const AdminScreen: React.FC<AdminScreenProps> = ({ currentTab, role = 'ad
     if (tabStr === 'admin_packages' || tabStr === 'package_members') return 'package_members';
     if (tabStr === 'admin_banners' || tabStr === 'banners') return 'banners';
     if (tabStr === 'admin_medicines' || tabStr === 'medicine') return 'medicine';
-    if (tabStr === 'admin_revenue' || tabStr === 'admin_pending' || tabStr === 'admin' || tabStr === 'analytics') return 'analytics';
+    if (tabStr === 'admin_revenue' || tabStr === 'revenue' || tabStr === 'total_revenue' || tabStr === 'finance') return 'revenue';
+    if (tabStr === 'admin_pending' || tabStr === 'admin' || tabStr === 'analytics') return 'analytics';
     return 'analytics';
   };
 
-  const [activeTab, setActiveTab] = useState<'analytics' | 'fee_requests' | 'leave_requests' | 'branch_cleaning' | 'employee_attendance' | 'employee_works' | 'package_members' | 'banners' | 'branches' | 'patients' | 'doctors' | 'staff' | 'medicine'>(() => normalizeTab(currentTab));
+  const [activeTab, setActiveTab] = useState<'analytics' | 'revenue' | 'fee_requests' | 'leave_requests' | 'branch_cleaning' | 'employee_attendance' | 'employee_works' | 'package_members' | 'banners' | 'branches' | 'patients' | 'doctors' | 'staff' | 'medicine'>(() => normalizeTab(currentTab));
 
   useEffect(() => {
     if (currentTab) {
@@ -889,6 +891,25 @@ export const AdminScreen: React.FC<AdminScreenProps> = ({ currentTab, role = 'ad
     );
   }
 
+  if (activeTab === 'revenue') {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#f8fafc' }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14, paddingTop: 12, paddingBottom: 10, backgroundColor: '#ffffff', borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <TouchableOpacity onPress={() => setActiveTab('analytics')} style={{ padding: 6, borderRadius: 8, backgroundColor: '#f1f5f9' }}>
+              <Ionicons name="arrow-back" size={20} color="#0f172a" />
+            </TouchableOpacity>
+            <View>
+              <Text style={{ fontSize: 16, fontWeight: '800', color: '#0f172a' }}>Total Revenue Dashboard</Text>
+              <Text style={{ fontSize: 11, color: '#64748b' }}>Live Financial Ledger & Breakdown</Text>
+            </View>
+          </View>
+        </View>
+        <AnalyticsRevenueScreen />
+      </View>
+    );
+  }
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 60 }} showsVerticalScrollIndicator={false}>
 
@@ -915,12 +936,20 @@ export const AdminScreen: React.FC<AdminScreenProps> = ({ currentTab, role = 'ad
                 </View>
                 <Text style={{ fontSize: 13, fontWeight: '800', color: '#0f172a' }}>Daily Operations</Text>
               </View>
-              <TouchableOpacity
-                onPress={() => setDailyOpsDate(new Date().toISOString().split('T')[0])}
-                style={{ backgroundColor: '#258ec8', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 }}
-              >
-                <Text style={{ color: '#ffffff', fontSize: 11, fontWeight: '800' }}>Today</Text>
-              </TouchableOpacity>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <TouchableOpacity
+                  onPress={() => setActiveTab('revenue')}
+                  style={{ backgroundColor: '#eff6ff', borderWidth: 1, borderColor: '#bfdbfe', paddingHorizontal: 9, paddingVertical: 4, borderRadius: 8 }}
+                >
+                  <Text style={{ color: '#0284c7', fontSize: 11, fontWeight: '800' }}>📊 Total Revenue</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setDailyOpsDate(new Date().toISOString().split('T')[0])}
+                  style={{ backgroundColor: '#258ec8', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 }}
+                >
+                  <Text style={{ color: '#ffffff', fontSize: 11, fontWeight: '800' }}>Today</Text>
+                </TouchableOpacity>
+              </View>
             </View>
 
             {/* DATE CONTROLS ROW */}

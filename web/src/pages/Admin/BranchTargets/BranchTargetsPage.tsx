@@ -1,22 +1,66 @@
 import React, { useState, useEffect } from 'react';
-import { Target, Edit3, Shield, CheckCircle2, X } from 'lucide-react';
-import { collection, onSnapshot, doc, setDoc } from 'firebase/firestore';
+import { Target, Edit3, Shield, CheckCircle2, X, Calendar } from 'lucide-react';
+import { collection, onSnapshot, doc, setDoc, getDoc } from 'firebase/firestore';
 import { db } from '@app/shared';
-
+import { TargetProgressWebUI } from '../../../components/TargetProgressWebUI';
+import { reconcileBranchTargetData, calculateRealBranchRevenue, getCurrentMonthYMD, getNextMonthYMD } from '../../../utils/branchRevenueCalculator';
 import { receptionDataStore } from '../../../utils/receptionDataStore';
-import { calculateRealBranchRevenue, syncBranchTargetToFirestore } from '../../../utils/branchRevenueCalculator';
 
 const DEFAULT_BRANCH_TARGETS = [
-  { id: 'kphb', name: 'KPHB Branch Target', monthlyTarget: 725000, targetReached: 0 },
-  { id: 'nallagandla', name: 'Nallagandla Branch Target', monthlyTarget: 325000, targetReached: 0 },
-  { id: 'dilshuknagar', name: 'Dilshuknagar Branch Target', monthlyTarget: 225000, targetReached: 0 },
-  { id: 'chandanagar', name: 'Chandanagar Branch Target', monthlyTarget: 550000, targetReached: 0 },
+  { id: 'kphb', name: 'KPHB Branch', monthlyTarget: 725000, targetReached: 0, nextMonthTarget: 0 },
+  { id: 'nallagandla', name: 'Nallagandla Branch', monthlyTarget: 325000, targetReached: 0, nextMonthTarget: 0 },
+  { id: 'dilshuknagar', name: 'Dilshuknagar Branch', monthlyTarget: 225000, targetReached: 0, nextMonthTarget: 0 },
+  { id: 'chandanagar', name: 'Chandanagar Branch', monthlyTarget: 550000, targetReached: 0, nextMonthTarget: 0 },
 ];
 
 export const BranchTargetsPage: React.FC = () => {
   const [branchTargets, setBranchTargets] = useState(DEFAULT_BRANCH_TARGETS);
   const [editingBranch, setEditingBranch] = useState<any>(null);
+  const [editingTargetType, setEditingTargetType] = useState<'current' | 'next'>('current');
   const [targetInput, setTargetInput] = useState('');
+  const [activeTabMonth, setActiveTabMonth] = useState<'current' | 'next'>('current');
+
+  const [appointmentsPool, setAppointmentsPool] = useState<any[]>(() => {
+    try {
+      const pool = receptionDataStore.getAllCollectionsPool();
+      if (pool && pool.length > 0) return pool;
+      return receptionDataStore.getAppointments() || [];
+    } catch (_) {
+      return [];
+    }
+  });
+
+  const [packageMembersList, setPackageMembersList] = useState<any[]>(() => {
+    try {
+      return receptionDataStore.getPackageMembers() || [];
+    } catch (_) {
+      return [];
+    }
+  });
+
+  const now = new Date();
+  const currentMonthName = now.toLocaleString('default', { month: 'long', year: 'numeric' });
+  const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const nextMonthName = nextMonthDate.toLocaleString('default', { month: 'long', year: 'numeric' });
+
+  useEffect(() => {
+    try {
+      receptionDataStore.startListeners();
+    } catch (_) {}
+
+    const unsubStore = receptionDataStore.subscribe((state) => {
+      if (state.allCollectionsPool && state.allCollectionsPool.length > 0) {
+        setAppointmentsPool(state.allCollectionsPool);
+      } else if (state.appointments && state.appointments.length > 0) {
+        setAppointmentsPool(state.appointments);
+      }
+      if (state.packageMembersList) {
+        setPackageMembersList(state.packageMembersList);
+      }
+    });
+
+    return () => unsubStore();
+  }, []);
 
   useEffect(() => {
     try {
@@ -30,12 +74,17 @@ export const BranchTargetsPage: React.FC = () => {
 
           setBranchTargets((prev: any[]) => {
             const updated = prev.map((b) => {
-              const live = liveMap[b.id.toLowerCase()] || liveMap[b.name.toLowerCase().replace(/\s*branch\s*target$/i, '')];
+              const live = liveMap[b.id.toLowerCase()] || liveMap[b.name.toLowerCase().replace(/\s*branch(\s*target)?$/i, '')];
               if (live) {
+                const reconciled = reconcileBranchTargetData(live, b.id);
+                const directRev = calculateRealBranchRevenue(b.id, appointmentsPool, packageMembersList, reconciled.monthlyTarget);
+                const effectiveReached = Math.max(reconciled.targetReached || 0, directRev.targetReached || 0);
+
                 return {
                   ...b,
-                  monthlyTarget: Number(live.monthlyTarget) || b.monthlyTarget,
-                  targetReached: live.targetReached !== undefined ? Number(live.targetReached) : b.targetReached,
+                  monthlyTarget: reconciled.monthlyTarget,
+                  targetReached: effectiveReached,
+                  nextMonthTarget: reconciled.nextMonthTarget,
                 };
               }
               return b;
@@ -48,12 +97,12 @@ export const BranchTargetsPage: React.FC = () => {
     } catch (err) {
       console.error('Error listening to branch targets:', err);
     }
-  }, []);
+  }, [appointmentsPool, packageMembersList]);
 
-  const handleOpenEdit = (b: any) => {
-    // Admin can edit at ANY time
+  const handleOpenEdit = (b: any, targetType: 'current' | 'next') => {
     setEditingBranch(b);
-    setTargetInput(b.monthlyTarget > 0 ? String(b.monthlyTarget) : '');
+    setEditingTargetType(targetType);
+    setTargetInput(String(targetType === 'current' ? (b.monthlyTarget || '') : (b.nextMonthTarget || '')));
   };
 
   const handleSaveTarget = async () => {
@@ -64,19 +113,43 @@ export const BranchTargetsPage: React.FC = () => {
       return;
     }
 
+    const currentMonthKey = getCurrentMonthYMD(now);
+    const nextMonthKey = getNextMonthYMD(now);
+
     try {
       const docRef = doc(db, 'branchTargets', editingBranch.id);
-      await setDoc(docRef, {
-        id: editingBranch.id,
+      const updatePayload: any = {
+        branchId: editingBranch.id,
         branchName: editingBranch.name,
-        monthlyTarget: num,
-        targetReached: editingBranch.targetReached || 0,
-        remaining: Math.max(0, num - (editingBranch.targetReached || 0)),
-        percentage: num > 0 ? Math.round(((editingBranch.targetReached || 0) / num) * 100) : 0,
-        updatedAt: new Date().toISOString()
-      }, { merge: true });
+        updatedAt: new Date().toISOString(),
+        currentMonth: currentMonthKey,
+        nextMonth: nextMonthKey,
+      };
 
-      setBranchTargets((prev: any[]) => prev.map((b: any) => b.id === editingBranch.id ? { ...b, monthlyTarget: num } : b));
+      if (editingTargetType === 'current') {
+        const currentDocSnap = await getDoc(docRef).catch(() => null);
+        const liveReached = Number(currentDocSnap?.data()?.targetReached ?? editingBranch.targetReached ?? 0);
+        updatePayload.monthlyTarget = num;
+        updatePayload.targetReached = liveReached;
+        updatePayload.remaining = Math.max(0, num - liveReached);
+        updatePayload.percentage = num > 0 ? Math.min(Math.round((liveReached / num) * 100), 100) : 0;
+        updatePayload.isReached = liveReached >= num;
+        updatePayload[`monthlyTargets.${currentMonthKey}`] = num;
+      } else {
+        updatePayload.nextMonthTarget = num;
+        updatePayload[`monthlyTargets.${nextMonthKey}`] = num;
+      }
+
+      await setDoc(docRef, updatePayload, { merge: true });
+
+      setBranchTargets((prev: any[]) => prev.map((b: any) => {
+        if (b.id === editingBranch.id) {
+          return editingTargetType === 'current'
+            ? { ...b, monthlyTarget: num }
+            : { ...b, nextMonthTarget: num };
+        }
+        return b;
+      }));
       setEditingBranch(null);
     } catch (err) {
       console.error('Error updating target:', err);
@@ -87,73 +160,135 @@ export const BranchTargetsPage: React.FC = () => {
   const formatCurrency = (val: number) => `₹${val.toLocaleString('en-IN')}`;
 
   return (
-    <div style={{ padding: '24px 20px', maxWidth: '1100px', margin: '0 auto', fontFamily: 'Inter, system-ui, sans-serif' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '10px' }}>
+    <div style={{ padding: '24px 20px', maxWidth: '1200px', margin: '0 auto', fontFamily: 'Inter, system-ui, sans-serif' }}>
+      
+      {/* Header Bar */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <Target size={24} color="#258ec8" />
           <div>
             <h1 style={{ fontSize: '18px', fontWeight: 800, color: '#0f172a', margin: 0 }}>
-              Branch Target Management
+              Branch Target Management (Admin)
             </h1>
             <p style={{ fontSize: '12px', color: '#64748b', margin: '2px 0 0' }}>
-              Set and monitor monthly revenue goals for all branches.
+              Set and monitor monthly financial targets for all branches with unrestricted Admin access.
             </p>
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', background: '#dcfce7', color: '#166534', padding: '6px 12px', borderRadius: '8px', fontSize: '0.8rem', fontWeight: 700 }}>
-          <Shield size={14} /> Admin Access: Edit Anytime
+        {/* Month Selector Tabs */}
+        <div style={{ display: 'flex', background: '#ffffff', borderRadius: '10px', padding: '4px', border: '1px solid #cbd5e1', gap: '4px' }}>
+          <button
+            type="button"
+            onClick={() => setActiveTabMonth('current')}
+            style={{
+              border: 'none',
+              padding: '6px 14px',
+              borderRadius: '7px',
+              fontWeight: 700,
+              fontSize: '0.82rem',
+              cursor: 'pointer',
+              background: activeTabMonth === 'current' ? '#258ec8' : 'transparent',
+              color: activeTabMonth === 'current' ? '#ffffff' : '#64748b',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}
+          >
+            <Calendar size={14} />
+            {currentMonthName} Target
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTabMonth('next')}
+            style={{
+              border: 'none',
+              padding: '6px 14px',
+              borderRadius: '7px',
+              fontWeight: 700,
+              fontSize: '0.82rem',
+              cursor: 'pointer',
+              background: activeTabMonth === 'next' ? '#258ec8' : 'transparent',
+              color: activeTabMonth === 'next' ? '#ffffff' : '#64748b',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}
+          >
+            <Calendar size={14} />
+            {nextMonthName} Target
+          </button>
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '16px' }}>
+      {/* Admin Access Info Banner */}
+      <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '12px', padding: '12px 16px', marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '10px', fontSize: '0.85rem', color: '#166534' }}>
+        <Shield size={16} color="#16a34a" />
+        <span>
+          Admin Access: You can enter, edit, and change branch targets for current or upcoming months at <strong>any time</strong>.
+        </span>
+      </div>
+
+      {/* Branch Cards Grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 480px), 1fr))', gap: '20px', width: '100%', boxSizing: 'border-box' }}>
         {branchTargets.map((b: any) => {
-          const pct = b.monthlyTarget > 0 ? Math.round((b.targetReached / b.monthlyTarget) * 100) : 0;
           return (
-            <div key={b.name} style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '16px', padding: '18px', boxShadow: '0 2px 6px rgba(15,23,42,0.03)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                <h3 style={{ fontSize: '14.5px', fontWeight: 800, color: '#0f172a', margin: 0 }}>{b.name}</h3>
+            <div key={b.id} style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '16px', padding: '20px', boxShadow: '0 2px 6px rgba(15,23,42,0.03)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+                <span style={{ fontSize: '15px', fontWeight: 800, color: '#0f172a' }}>{b.name}</span>
                 <button
                   type="button"
-                  onClick={() => handleOpenEdit(b)}
+                  onClick={() => handleOpenEdit(b, activeTabMonth)}
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
                     gap: '4px',
-                    background: '#f1f5f9',
-                    border: '1px solid #cbd5e1',
-                    borderRadius: '6px',
-                    padding: '4px 8px',
-                    fontSize: '0.75rem',
+                    background: '#258ec8',
+                    border: 'none',
+                    borderRadius: '8px',
+                    padding: '6px 12px',
+                    fontSize: '0.78rem',
                     fontWeight: 700,
-                    color: '#258ec8',
+                    color: '#ffffff',
                     cursor: 'pointer'
                   }}
                 >
-                  <Edit3 size={12} /> {b.monthlyTarget > 0 ? 'Edit' : 'Set'}
+                  <Edit3 size={13} /> {activeTabMonth === 'current' ? `Set ${now.toLocaleString('default', { month: 'short' })} Target` : `Set ${nextMonthDate.toLocaleString('default', { month: 'short' })} Target`}
                 </button>
               </div>
 
-              <p style={{ fontSize: '12.5px', color: '#64748b', margin: '4px 0' }}>
-                Target: <b style={{ color: b.monthlyTarget > 0 ? '#258ec8' : '#94a3b8' }}>{b.monthlyTarget > 0 ? formatCurrency(b.monthlyTarget) : 'Not Set'}</b>
-              </p>
-              <p style={{ fontSize: '12.5px', color: '#64748b', margin: '4px 0' }}>
-                Achieved: <b style={{ color: '#16a34a' }}>{formatCurrency(b.targetReached)}</b>
-              </p>
-
-              {b.monthlyTarget > 0 ? (
-                <div style={{ marginTop: '10px' }}>
-                  <div style={{ height: '6px', background: '#e2e8f0', borderRadius: '3px', overflow: 'hidden' }}>
-                    <div style={{ width: `${Math.min(pct, 100)}%`, height: '100%', background: '#258ec8' }} />
-                  </div>
-                  <span style={{ fontSize: '11px', fontWeight: 700, color: '#258ec8', marginTop: '4px', display: 'block', textAlign: 'right' }}>
-                    {pct}% Achieved
-                  </span>
-                </div>
+              {/* Progress UI for Current Month vs Next Month Goal Box */}
+              {activeTabMonth === 'current' ? (
+                (() => {
+                  const directRev = calculateRealBranchRevenue(b.id, appointmentsPool, packageMembersList, b.monthlyTarget);
+                  const effectiveReached = Math.max(b.targetReached || 0, directRev.targetReached || 0);
+                  return (
+                    <TargetProgressWebUI
+                      branchName={b.name}
+                      monthlyTarget={b.monthlyTarget}
+                      targetReached={effectiveReached}
+                    />
+                  );
+                })()
               ) : (
-                <span style={{ fontSize: '11px', fontWeight: 600, color: '#94a3b8', marginTop: '8px', display: 'block' }}>
-                  No target defined for this month
-                </span>
+                <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '16px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                    <span style={{ fontSize: '0.85rem', fontWeight: 800, color: '#0f172a' }}>
+                      📅 {nextMonthName} Planned Goal
+                    </span>
+                    <span style={{ background: '#dcfce7', border: '1px solid #bbf7d0', padding: '3px 8px', borderRadius: '6px', fontSize: '0.72rem', fontWeight: 800, color: '#16a34a' }}>
+                      Admin: Unrestricted
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#ffffff', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                    <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 600 }}>
+                      Configured Target ({nextMonthDate.toLocaleString('default', { month: 'short' })}):
+                    </span>
+                    <span style={{ fontSize: '1.1rem', fontWeight: 800, color: '#0f172a' }}>
+                      {b.nextMonthTarget > 0 ? formatCurrency(b.nextMonthTarget) : 'Not Configured Yet'}
+                    </span>
+                  </div>
+                </div>
               )}
             </div>
           );
@@ -181,7 +316,9 @@ export const BranchTargetsPage: React.FC = () => {
             boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)'
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-              <h2 style={{ fontSize: '16px', fontWeight: 800, color: '#0f172a', margin: 0 }}>Set Monthly Target</h2>
+              <h2 style={{ fontSize: '16px', fontWeight: 800, color: '#0f172a', margin: 0 }}>
+                Set {editingTargetType === 'current' ? currentMonthName : nextMonthName} Target
+              </h2>
               <button type="button" onClick={() => setEditingBranch(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b' }}>
                 <X size={18} />
               </button>
@@ -195,7 +332,7 @@ export const BranchTargetsPage: React.FC = () => {
               type="number"
               value={targetInput}
               onChange={(e) => setTargetInput(e.target.value)}
-              placeholder="e.g. 1500000"
+              placeholder="Enter target amount (e.g. 725000)"
               style={{
                 width: '100%',
                 boxSizing: 'border-box',

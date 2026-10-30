@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, ScrollView, TouchableOpacity, Modal, TextInput, Alert } from 'react-native';
 import { Feather, Ionicons } from '@expo/vector-icons';
-import { getSafeDb, doc, onSnapshot, setDoc, collection } from '../../../utils/firebaseSafe';
+import { getSafeDb, doc, getDoc, onSnapshot, setDoc, collection } from '../../../utils/firebaseSafe';
 import { TargetProgressUI } from '../../../components/TargetProgressUI';
+import { receptionDataStore } from '../../../utils/receptionDataStore';
+import { reconcileBranchTargetData, getCurrentMonthYMD, getNextMonthYMD, calculateRealBranchRevenue } from '../../../utils/branchRevenueCalculator';
 
 const DEFAULT_BRANCH_TARGETS = [
   { id: 'kphb', name: 'KPHB Branch', phone: '+91 90301 76176', monthlyTarget: 725000, targetReached: 0, nextMonthTarget: 0 },
@@ -50,18 +52,21 @@ export const ManageBranchesScreen: React.FC<ManageBranchesScreenProps> = ({ onBa
             liveDataMap[docSnap.id.toLowerCase()] = docSnap.data();
           });
 
+          const allPool = receptionDataStore.getAllCollectionsPool() || [];
+          const pkgPool = receptionDataStore.getPackageMembers() || [];
+
           setBranches((prev) =>
             prev.map((b) => {
               const live = liveDataMap[b.id.toLowerCase()] || liveDataMap[b.name.toLowerCase()];
-              if (live) {
-                return {
-                  ...b,
-                  monthlyTarget: Number(live.monthlyTarget) || b.monthlyTarget,
-                  targetReached: live.targetReached !== undefined ? Number(live.targetReached) : b.targetReached,
-                  nextMonthTarget: live.nextMonthTarget !== undefined ? Number(live.nextMonthTarget) : 0,
-                };
-              }
-              return b;
+              const reconciled = reconcileBranchTargetData(live, b.id);
+              const realRev = calculateRealBranchRevenue(b.name, allPool, pkgPool, reconciled.monthlyTarget);
+              const bestReached = Math.max(reconciled.targetReached || 0, realRev.targetReached || 0);
+              return {
+                ...b,
+                monthlyTarget: reconciled.monthlyTarget,
+                targetReached: bestReached,
+                nextMonthTarget: reconciled.nextMonthTarget,
+              };
             })
           );
         }
@@ -73,9 +78,16 @@ export const ManageBranchesScreen: React.FC<ManageBranchesScreenProps> = ({ onBa
   }, []);
 
   const handleOpenEdit = (b: any, targetType: 'current' | 'next') => {
-    // Admin can edit at ANY time (both current and next month)
-    // HR can only enter or change targets 2 days before month end
-    if (!isAdmin && !isNextMonthUnlocked) {
+    // Current month target is locked for HR once the month starts
+    if (!isAdmin && targetType === 'current') {
+      Alert.alert(
+        'Target Setting Locked 🔒',
+        `HR cannot change the active month's target once the month has begun. Only Admin can edit the current month target. HR can set the upcoming month target starting 2 days before month end.`
+      );
+      return;
+    }
+    // Next month target unlocks 2 days before month end for HR
+    if (!isAdmin && targetType === 'next' && !isNextMonthUnlocked) {
       Alert.alert(
         'Target Setting Locked 🔒',
         `HR can enter or change targets only 2 days before month end (unlocks on ${now.toLocaleString('default', { month: 'short' })} ${unlockDay}th). Admin can edit targets anytime.`
@@ -96,20 +108,31 @@ export const ManageBranchesScreen: React.FC<ManageBranchesScreenProps> = ({ onBa
       return;
     }
 
+    const currentMonthKey = getCurrentMonthYMD(now);
+    const nextMonthKey = getNextMonthYMD(now);
+
     try {
       const updateData: any = {
         branchId: selectedBranch.id,
         branchName: selectedBranch.name,
         updatedAt: new Date().toISOString(),
+        currentMonth: currentMonthKey,
+        nextMonth: nextMonthKey,
       };
 
       if (editingTargetType === 'current') {
+        const snap = await getDoc(doc(db, 'branchTargets', selectedBranch.id)).catch(() => null);
+        const existingData = snap?.data() || {};
+        const liveReached = Math.max(Number(existingData.targetReached || 0), Number(selectedBranch.targetReached || 0));
         updateData.monthlyTarget = num;
-        updateData.targetReached = selectedBranch.targetReached || 0;
-        updateData.remaining = Math.max(0, num - (selectedBranch.targetReached || 0));
-        updateData.percentage = num > 0 ? Math.round(((selectedBranch.targetReached || 0) / num) * 100) : 0;
+        updateData.targetReached = liveReached;
+        updateData.remaining = Math.max(0, num - liveReached);
+        updateData.percentage = num > 0 ? Math.round((liveReached / num) * 100) : 0;
+        updateData.isReached = liveReached >= num;
+        updateData[`monthlyTargets.${currentMonthKey}`] = num;
       } else {
         updateData.nextMonthTarget = num;
+        updateData[`monthlyTargets.${nextMonthKey}`] = num;
       }
 
       await setDoc(doc(db, 'branchTargets', selectedBranch.id), updateData, { merge: true });
@@ -188,27 +211,50 @@ export const ManageBranchesScreen: React.FC<ManageBranchesScreenProps> = ({ onBa
               <Text style={styles.branchName}>{b.name}</Text>
               <Text style={styles.branchPhone}>📞 {b.phone}</Text>
             </View>
-            <TouchableOpacity
-              style={[
-                styles.editBtn,
-                isLockedForRole && { backgroundColor: '#f1f5f9' }
-              ]}
-              disabled={isLockedForRole}
-              onPress={() => handleOpenEdit(b, activeMonthTab)}
-            >
-              <Feather
-                name={isLockedForRole ? 'lock' : 'edit-3'}
-                size={14}
-                color={isLockedForRole ? '#94a3b8' : '#ffffff'}
-              />
-              <Text style={[
-                styles.editBtnText,
-                isLockedForRole && { color: '#94a3b8' },
-                !isLockedForRole && { color: '#ffffff' }
-              ]}>
-                {isLockedForRole ? 'Locked' : activeMonthTab === 'current' ? 'Set Target' : 'Set Next Target'}
-              </Text>
-            </TouchableOpacity>
+            {activeMonthTab === 'current' ? (
+              <TouchableOpacity
+                style={[
+                  styles.editBtn,
+                  !isAdmin && { backgroundColor: '#f1f5f9' }
+                ]}
+                disabled={!isAdmin}
+                onPress={() => handleOpenEdit(b, 'current')}
+              >
+                <Feather
+                  name={isAdmin ? 'edit-3' : 'lock'}
+                  size={14}
+                  color={isAdmin ? '#ffffff' : '#94a3b8'}
+                />
+                <Text style={[
+                  styles.editBtnText,
+                  !isAdmin && { color: '#94a3b8' }
+                ]}>
+                  {isAdmin ? 'Set Target' : 'Locked'}
+                </Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                style={[
+                  styles.editBtn,
+                  isLockedForRole && { backgroundColor: '#f1f5f9' }
+                ]}
+                disabled={isLockedForRole}
+                onPress={() => handleOpenEdit(b, 'next')}
+              >
+                <Feather
+                  name={isLockedForRole ? 'lock' : 'edit-3'}
+                  size={14}
+                  color={isLockedForRole ? '#94a3b8' : '#ffffff'}
+                />
+                <Text style={[
+                  styles.editBtnText,
+                  isLockedForRole && { color: '#94a3b8' },
+                  !isLockedForRole && { color: '#ffffff' }
+                ]}>
+                  {isLockedForRole ? 'Locked' : 'Set Next Target'}
+                </Text>
+              </TouchableOpacity>
+            )}
           </View>
 
           {/* Current Month Target View */}
@@ -258,7 +304,7 @@ export const ManageBranchesScreen: React.FC<ManageBranchesScreenProps> = ({ onBa
               keyboardType="numeric"
               value={targetInput}
               onChangeText={setTargetInput}
-              placeholder="e.g. 1200000"
+              placeholder="Enter target amount (e.g. 725000)"
             />
 
             <View style={styles.modalActions}>

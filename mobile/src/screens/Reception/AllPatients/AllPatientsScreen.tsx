@@ -2,10 +2,15 @@ import React, { useState, useMemo, useEffect, useCallback, memo } from 'react';
 import {
   StyleSheet, Text, View, FlatList, TextInput, TouchableOpacity,
   Modal, Alert, Linking, ActivityIndicator, Platform, ScrollView,
-  SafeAreaView, Image, Dimensions, StatusBar
+  SafeAreaView, Image, Dimensions, StatusBar, BackHandler, PanResponder, ToastAndroid
 } from 'react-native';
 import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { getSafeDb, collection, query, where, getDocs, limit } from '../../../utils/firebaseSafe';
+import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
+import {
+  getSafeDb, collection, query, where, getDocs, limit,
+  doc, getDoc, updateDoc, setDoc, arrayUnion, arrayRemove
+} from '../../../utils/firebaseSafe';
 import { sanitizeDoctorName } from '@app/shared';
 import { receptionDataStore } from '../../../utils/receptionDataStore';
 import { getPatientVisitState } from '../../../utils/patientVisitState';
@@ -44,6 +49,9 @@ export interface PatientVisitHistoryItem {
   paymentStatus: string;
   paymentId?: string;
   splitDetails?: string;
+  paymentDate?: string;
+  paymentTime?: string;
+  visitNumber?: number;
   chiefComplaint?: string;
   diagnosisNotes?: string;
   doctorNotes?: string;
@@ -59,9 +67,87 @@ export interface PatientVisitHistoryItem {
   raw?: any;
 }
 
+export interface PatientFamilyProfile {
+  profileKey: string;
+  name: string;
+  regId: string;
+  phone: string;
+  branch: string;
+  age?: string | number;
+  gender?: string;
+  primaryDocId: string;
+  visits: PatientVisitHistoryItem[];
+  rawDocs: any[];
+}
+
+// Helper to stream prescription images to Firebase Storage
+const uploadPrescriptionToStorage = async (dataOrUri: string, patId?: string): Promise<string> => {
+  if (!dataOrUri) return '';
+  if (dataOrUri.startsWith('http://') || dataOrUri.startsWith('https://')) {
+    return dataOrUri;
+  }
+
+  const bucket = "spiritual-homeopathy-3b552.firebasestorage.app";
+  const safePatId = (patId || 'unknown').toString().replace(/[^a-zA-Z0-9_-]/g, '_');
+  let ext = 'jpg';
+  let contentType = 'image/jpeg';
+  if (dataOrUri.includes('image/png') || dataOrUri.endsWith('.png')) {
+    ext = 'png';
+    contentType = 'image/png';
+  }
+
+  const filename = `prescriptions/${safePatId}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext}`;
+  const encodedPath = encodeURIComponent(filename);
+
+  let localFileToUpload = dataOrUri;
+  let isTempFile = false;
+
+  try {
+    if (dataOrUri.startsWith('data:') || (!dataOrUri.startsWith('file://') && !dataOrUri.startsWith('content://'))) {
+      const commaIdx = dataOrUri.indexOf(',');
+      const base64Data = commaIdx !== -1 ? dataOrUri.substring(commaIdx + 1) : dataOrUri;
+      const tempPath = `${FileSystem.cacheDirectory}rx_${Date.now()}_${Math.random().toString(36).substring(2, 6)}.${ext}`;
+      await FileSystem.writeAsStringAsync(tempPath, base64Data, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      localFileToUpload = tempPath;
+      isTempFile = true;
+    }
+
+    const uploadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o?name=${encodedPath}`;
+    const uploadResult = await FileSystem.uploadAsync(uploadUrl, localFileToUpload, {
+      httpMethod: 'POST',
+      uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+      headers: {
+        'Content-Type': contentType,
+      },
+    });
+
+    if (uploadResult.status >= 200 && uploadResult.status < 300) {
+      let downloadTokens = '';
+      try {
+        const parsed = JSON.parse(uploadResult.body);
+        downloadTokens = parsed.downloadTokens || '';
+      } catch (_) { }
+      return `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodedPath}?alt=media&token=${downloadTokens}`;
+    }
+  } catch (err) {
+    console.warn("Storage upload notice:", err);
+  } finally {
+    if (isTempFile) {
+      try {
+        await FileSystem.deleteAsync(localFileToUpload, { idempotent: true });
+      } catch (_) { }
+    }
+  }
+  return dataOrUri;
+};
+
 interface AllPatientsScreenProps {
   onNavigate?: (tab: string, patient?: any) => void;
   currentBranch?: string;
+  onBack?: () => boolean | void;
+  isActive?: boolean;
 }
 
 // --- Helper Functions for Date & Branch Normalize ---
@@ -92,7 +178,13 @@ const normalizeDateToISO = (raw: any): string => {
 
   const clean = String(raw).trim();
   if (!clean || clean === '[object Object]' || clean === 'undefined' || clean === 'null') return '';
-  if (clean.includes('T')) return clean.split('T')[0];
+  if (clean.includes('T')) {
+    const parsed = new Date(clean);
+    if (!isNaN(parsed.getTime())) {
+      return getFormattedDateStr(parsed);
+    }
+    return clean.split('T')[0];
+  }
 
   // Take date portion before any space/time (e.g. "19-10-2026 10:30 AM" -> "19-10-2026")
   const datePortion = clean.split(/\s+/)[0];
@@ -107,10 +199,25 @@ const normalizeDateToISO = (raw: any): string => {
         const dd = parts[2].padStart(2, '0');
         return `${yyyy}-${mm}-${dd}`;
       } else if (parts[2].length === 4 || parts[2].length === 2) {
-        // DD-MM-YYYY or DD-MM-YY
-        const dd = parts[0].padStart(2, '0');
-        const mm = parts[1].padStart(2, '0');
+        // DD-MM-YYYY or MM-DD-YYYY or DD-MM-YY
         const yyyy = parts[2].length === 2 ? `20${parts[2]}` : parts[2];
+        const p0 = parseInt(parts[0], 10);
+        const p1 = parseInt(parts[1], 10);
+        let dd = '';
+        let mm = '';
+        if (p1 > 12) {
+          // parts[1] is day, parts[0] is month (e.g. 10/29/2026)
+          mm = parts[0].padStart(2, '0');
+          dd = parts[1].padStart(2, '0');
+        } else if (p0 > 12) {
+          // parts[0] is day, parts[1] is month (e.g. 29/10/2026)
+          dd = parts[0].padStart(2, '0');
+          mm = parts[1].padStart(2, '0');
+        } else {
+          // Both <= 12: default Indian clinical convention is DD-MM-YYYY
+          dd = parts[0].padStart(2, '0');
+          mm = parts[1].padStart(2, '0');
+        }
         return `${yyyy}-${mm}-${dd}`;
       }
     }
@@ -122,6 +229,72 @@ const normalizeDateToISO = (raw: any): string => {
   }
 
   return datePortion;
+};
+
+const formatPrettyDate = (dateStr?: string): string => {
+  if (!dateStr) return '';
+  const clean = normalizeDateToISO(dateStr);
+  if (!clean || !clean.includes('-')) return String(dateStr);
+  const parts = clean.split('-');
+  if (parts.length === 3) {
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const yyyy = parts[0];
+    const mm = parts[1];
+    const dd = parts[2];
+    const mIdx = parseInt(mm, 10) - 1;
+    if (mIdx >= 0 && mIdx < 12) {
+      return `${dd} ${monthNames[mIdx]} ${yyyy}`;
+    }
+  }
+  return clean;
+};
+
+const extractPaymentDateTime = (data: any): { paymentDate: string; paymentTime?: string } => {
+  if (!data) return { paymentDate: '', paymentTime: '' };
+  // Only check authentic payment collection / transaction timestamps.
+  // NEVER fallback to appointmentDate, appointmentTime, or updatedAt here!
+  const rawDate = data.paymentCollectedAt || data.paidAt || data.transactionDate || data.collectionDate || data.paidDate;
+  let paymentDate = '';
+  let paymentTime = '';
+
+  if (rawDate) {
+    if (typeof rawDate === 'object') {
+      if (typeof rawDate.toDate === 'function') {
+        try {
+          const d = rawDate.toDate();
+          paymentDate = getFormattedDateStr(d);
+          paymentTime = d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+        } catch (_) {}
+      } else if (typeof rawDate.seconds === 'number') {
+        try {
+          const d = new Date(rawDate.seconds * 1000);
+          paymentDate = getFormattedDateStr(d);
+          paymentTime = d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+        } catch (_) {}
+      } else if (rawDate instanceof Date && !isNaN(rawDate.getTime())) {
+        paymentDate = getFormattedDateStr(rawDate);
+        paymentTime = rawDate.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+      }
+    } else {
+      const str = String(rawDate).trim();
+      paymentDate = normalizeDateToISO(str);
+      if (str.includes('T') || str.includes(':')) {
+        try {
+          const d = new Date(str);
+          if (!isNaN(d.getTime())) {
+            paymentTime = d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  // Explicit payment time if recorded separately
+  if (!paymentTime && data.paymentTime) {
+    paymentTime = String(data.paymentTime);
+  }
+
+  return { paymentDate, paymentTime };
 };
 
 const normalizeBranchName = (b: string): string => {
@@ -250,9 +423,15 @@ const parsePoolToPatients = (pool: any[], currentBranch?: string, todayStr?: str
     const cleanPhone = String(data.phoneNumber || data.phone || data.mobile || data.contactNumber || '').replace(/\D/g, '').slice(-10);
     const pName = data.patientName || data.name || data.fullName || 'Patient';
     const regId = data.registrationId || data.regId || data.regNo || data.patientId || idKey;
-    // Extract actual appointment / booking date. Never fallback to today so old or undated master records don't populate 'Today'!
-    const rawDate = data.appointmentDate || data.date || data.bookingDate || data.slotDate || data.dateString || data.scheduledDate || data.createdAt;
+    // Extract actual clinic appointment / booking date.
+    // NEVER use scheduledDate or preferredFollowUpDate here (those are future follow-up reminder dates, not visit dates!)
+    const rawDate = data.appointmentDate || data.date || data.bookingDate || data.slotDate || data.dateString || data.createdAt;
     const isoDate = normalizeDateToISO(rawDate);
+
+    // If this is a future date (> today) and not a completed visit, skip it so future follow-up dates never show as 'Pay Pending'
+    const todayYMD = todayStr || getFormattedDateStr(new Date());
+    const isFutureDate = Boolean(isoDate && isoDate > todayYMD);
+
     let status = 'active';
     const s = String(data.status || '').toLowerCase().trim();
     const p = String(data.paymentStatus || '').toLowerCase().trim();
@@ -261,7 +440,13 @@ const parsePoolToPatients = (pool: any[], currentBranch?: string, todayStr?: str
     } else if (s === 'follow_up' || s === 'followup' || data.followUpOpted === true) {
       status = 'follow_up';
     } else if (s === 'collect_fee' || s === 'awaiting_payment' || p === 'pending') {
-      status = 'awaiting_payment';
+      // Future dates are NOT 'awaiting_payment' today! They are upcoming scheduled appointments
+      status = isFutureDate ? 'scheduled' : 'awaiting_payment';
+    }
+
+    // Skip future uncompleted placeholder follow-up slots from appearing in the primary patient list
+    if (isFutureDate && status !== 'completed') {
+      return;
     }
 
     // Session deduplication key: combines cleanPhone/regId + date so multiple entries for the same patient on that day merge together!
@@ -285,8 +470,10 @@ const parsePoolToPatients = (pool: any[], currentBranch?: string, todayStr?: str
     } else {
       // Merge with existing record to avoid duplicate cards on the same session
       const existing = patientSessionMap.get(sessionKey)!;
-      if (status === 'completed' || status === 'follow_up') {
-        existing.status = status;
+      if (status === 'completed') {
+        existing.status = 'completed';
+      } else if (status === 'follow_up' && existing.status !== 'completed') {
+        existing.status = 'follow_up';
       }
       if ((!existing.doctorName || existing.doctorName === 'Homeopathic Doctor') && (data.doctorName || data.doctor)) {
         existing.doctorName = sanitizeDoctorName(data.doctorName || data.doctor, bName);
@@ -314,41 +501,59 @@ const consolidateVisitsForPatient = (rawDocs: any[], fallbackPatient: Patient): 
   // Map of documentId / appointmentId -> canonical date key
   const aptIdToKeyMap = new Map<string, string>();
 
-  // Pass 1: Index all appointment and document IDs to their visit dates
+  // Pass 1: Index all true appointment documents to their scheduled visit dates
+  // Only documents with an explicit appointment/booking date populate the index!
   for (const d of rawDocs) {
     if (!d) continue;
-    const rawDate = d.appointmentDate || d.date || d.bookingDate || d.createdAt || fallbackPatient.appointmentDate;
-    const isoDate = normalizeDateToISO(rawDate) || String(rawDate).split('T')[0] || getFormattedDateStr(new Date());
-
     const docId = d.id || d.docId || '';
     const aptId = d.appointmentId || d.bookingId || d.aptId || d.visitId || '';
 
-    if (docId) aptIdToKeyMap.set(docId, isoDate);
-    if (aptId) aptIdToKeyMap.set(aptId, isoDate);
+    // Prefer explicit appointmentDate, date, bookingDate, or slotDate over generic createdAt
+    const explicitDate = d.appointmentDate || d.date || d.bookingDate || d.slotDate;
+    if (explicitDate) {
+      const isoDate = normalizeDateToISO(explicitDate);
+      if (isoDate) {
+        if (docId) aptIdToKeyMap.set(docId, isoDate);
+        if (aptId) aptIdToKeyMap.set(aptId, isoDate);
+      }
+    }
   }
 
-  // Pass 2: Merge each document (appointment, prescription, product_bill) into the visit on its date
+  // Pass 2: Merge each document (appointment, prescription, product_bill, transaction) into the visit on its date
   for (const d of rawDocs) {
     if (!d) continue;
-    const rawDate = d.appointmentDate || d.date || d.bookingDate || d.createdAt || fallbackPatient.appointmentDate;
-    const isoDate = normalizeDateToISO(rawDate) || String(rawDate).split('T')[0] || getFormattedDateStr(new Date());
-
     const docId = d.id || d.docId || '';
     const aptId = d.appointmentId || d.bookingId || d.aptId || d.visitId || '';
 
-    let targetKey = isoDate;
+    let targetKey = '';
     if (aptId && aptIdToKeyMap.has(aptId)) {
       targetKey = aptIdToKeyMap.get(aptId)!;
     } else if (docId && aptIdToKeyMap.has(docId)) {
       targetKey = aptIdToKeyMap.get(docId)!;
+    } else {
+      const rawDate = d.appointmentDate || d.date || d.bookingDate || d.slotDate || d.createdAt || fallbackPatient.appointmentDate;
+      targetKey = normalizeDateToISO(rawDate) || getFormattedDateStr(new Date());
     }
 
     const pm = extractAmountAndPaymentMode(d);
+    const payDT = extractPaymentDateTime(d);
     const meds = extractMedicinesFromRecord(d);
     const imgs = extractPrescriptionImagesFromRecord(d);
     const bName = d.branch || d.targetBranch || d.branchName || fallbackPatient.branchName || 'Clinic';
     const docName = sanitizeDoctorName(d.doctorName || d.doctor, bName);
     const rawTime = d.appointmentTime || d.time || d.timeSlot || '';
+
+    const isPaidRecord = pm.amountPaid > 0 || pm.status === 'paid' || d.status === 'completed';
+    const todayStr = getFormattedDateStr(new Date());
+    let initialPaymentDate = payDT.paymentDate || '';
+    if (!initialPaymentDate && isPaidRecord) {
+      const createdIso = d.createdAt ? normalizeDateToISO(d.createdAt) : '';
+      if (createdIso && createdIso <= todayStr) {
+        initialPaymentDate = createdIso;
+      } else if (targetKey <= todayStr) {
+        initialPaymentDate = targetKey;
+      }
+    }
 
     if (!visitMap.has(targetKey)) {
       visitMap.set(targetKey, {
@@ -357,7 +562,7 @@ const consolidateVisitsForPatient = (rawDocs: any[], fallbackPatient: Patient): 
         time: rawTime || '10:00 AM',
         branch: bName,
         doctor: docName || fallbackPatient.doctorName || 'Homeopathic Doctor',
-        status: d.status || (pm.amountPaid > 0 ? 'completed' : 'active'),
+        status: d.status || (isPaidRecord ? 'completed' : 'active'),
         amountPaid: pm.amountPaid,
         totalAmount: pm.totalAmount,
         consultationFee: Number(d.consultationFee) || 0,
@@ -367,6 +572,8 @@ const consolidateVisitsForPatient = (rawDocs: any[], fallbackPatient: Patient): 
         paymentStatus: pm.status,
         paymentId: pm.paymentId,
         splitDetails: pm.splitDetails,
+        paymentDate: initialPaymentDate,
+        paymentTime: payDT.paymentTime || '',
         chiefComplaint: d.chiefComplaint || d.subject || d.complaints || '',
         diagnosisNotes: d.diagnosisNotes || d.diagnosis || d.diseases || '',
         doctorNotes: d.doctorNotes || d.notes || d.advice || d.instructions || '',
@@ -376,6 +583,21 @@ const consolidateVisitsForPatient = (rawDocs: any[], fallbackPatient: Patient): 
       });
     } else {
       const existing = visitMap.get(targetKey)!;
+
+      // Merge payment date and time if available
+      if (payDT.paymentDate) {
+        existing.paymentDate = payDT.paymentDate;
+      } else if (!existing.paymentDate && isPaidRecord) {
+        const createdIso = d.createdAt ? normalizeDateToISO(d.createdAt) : '';
+        if (createdIso && createdIso <= todayStr) {
+          existing.paymentDate = createdIso;
+        } else if (targetKey <= todayStr) {
+          existing.paymentDate = targetKey;
+        }
+      }
+      if (payDT.paymentTime && !existing.paymentTime) {
+        existing.paymentTime = payDT.paymentTime;
+      }
 
       // Merge doctor name (prefer actual doctor over generic placeholder)
       if ((!existing.doctor || existing.doctor === 'Homeopathic Doctor' || existing.doctor === 'Doctor') && docName && docName !== 'Homeopathic Doctor') {
@@ -424,10 +646,10 @@ const consolidateVisitsForPatient = (rawDocs: any[], fallbackPatient: Patient): 
       }
 
       // Merge fees
-      existing.totalAmount = Math.max(existing.totalAmount, pm.totalAmount);
-      existing.consultationFee = Math.max(existing.consultationFee, Number(d.consultationFee) || 0);
-      existing.medicineFee = Math.max(existing.medicineFee, Number(d.medicineFee || d.totalMedicineFee) || 0);
-      existing.discount = Math.max(existing.discount, Number(d.discount || d.discountAmount) || 0);
+      existing.totalAmount = Math.max(Number(existing.totalAmount) || 0, Number(pm.totalAmount) || 0);
+      existing.consultationFee = Math.max(Number(existing.consultationFee) || 0, Number(d.consultationFee) || 0);
+      existing.medicineFee = Math.max(Number(existing.medicineFee) || 0, Number(d.medicineFee || d.totalMedicineFee) || 0);
+      existing.discount = Math.max(Number(existing.discount) || 0, Number(d.discount || d.discountAmount) || 0);
 
       // Merge clinical notes
       if (!existing.chiefComplaint && (d.chiefComplaint || d.subject || d.complaints)) {
@@ -466,8 +688,126 @@ const consolidateVisitsForPatient = (rawDocs: any[], fallbackPatient: Patient): 
   }
 
   const visits = Array.from(visitMap.values());
-  visits.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
-  return visits;
+  // Sort chronologically ascending to assign permanent visitNumber (Visit 1 = patient's first ever visit)
+  visits.sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+  visits.forEach((v, idx) => {
+    v.visitNumber = idx + 1;
+  });
+  // Filter out future uncompleted placeholder follow-up slots so history strictly shows actual completed visits
+  const todayYMD = getFormattedDateStr(new Date());
+  const completedVisits = visits.filter(v => {
+    const isFuture = String(v.date || '') > todayYMD;
+    const isCompleted = v.status === 'completed' || v.amountPaid > 0 || v.paymentStatus === 'paid';
+    return !isFuture || isCompleted;
+  });
+
+  // Default return sorted descending (newest first)
+  completedVisits.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  return completedVisits;
+};
+
+// Separate documents into distinct patient profiles (e.g. different family members sharing the same phone)
+const groupDocsByProfile = (docs: any[], defaultPat: Patient): PatientFamilyProfile[] => {
+  const profileMap = new Map<string, {
+    profileKey: string;
+    name: string;
+    regId: string;
+    phone: string;
+    branch: string;
+    age?: any;
+    gender?: any;
+    primaryDocId: string;
+    rawDocs: any[];
+  }>();
+
+  const cleanDefaultPhone = String(defaultPat.phone || '').replace(/\D/g, '').slice(-10);
+  const cleanDefaultReg = String(defaultPat.regId || defaultPat.id || '').trim();
+
+  docs.forEach(d => {
+    if (!d) return;
+    const docName = String(d.patientName || d.fullName || d.name || d.patient_name || '').trim();
+    const docPhone = String(d.phone || d.phoneNumber || d.mobile || d.contactNumber || '').replace(/\D/g, '').slice(-10);
+    const docReg = String(d.registrationId || d.regId || d.regNo || d.patientId || '').trim();
+    const docBranch = d.branchName || d.branch || defaultPat.branchName || '';
+    const docId = d.id || d.docId || '';
+
+    const normalizedDocName = docName.replace(/^(mr|mrs|ms|dr|master|miss)\.?\s+/i, '').trim().toLowerCase();
+
+    // Determine profile key:
+    let pKey = '';
+    if (docReg && docReg.toUpperCase().startsWith('SPH-')) {
+      pKey = docReg.toUpperCase();
+    } else if (normalizedDocName && normalizedDocName.length > 2) {
+      pKey = normalizedDocName;
+    } else if (docReg) {
+      pKey = docReg.toLowerCase();
+    } else {
+      pKey = defaultPat.id;
+    }
+
+    if (!profileMap.has(pKey)) {
+      profileMap.set(pKey, {
+        profileKey: pKey,
+        name: docName || defaultPat.name,
+        regId: docReg || (pKey.startsWith('SPH-') ? pKey : cleanDefaultReg),
+        phone: docPhone || cleanDefaultPhone,
+        branch: docBranch,
+        age: d.age,
+        gender: d.gender,
+        primaryDocId: docId || defaultPat.id,
+        rawDocs: [d],
+      });
+    } else {
+      const existing = profileMap.get(pKey)!;
+      existing.rawDocs.push(d);
+      if (!existing.regId && docReg) existing.regId = docReg;
+      if (!existing.primaryDocId && docId) existing.primaryDocId = docId;
+      if (docName && docName.length > existing.name.length) existing.name = docName;
+    }
+  });
+
+  const list: PatientFamilyProfile[] = [];
+  profileMap.forEach(prof => {
+    const consolidated = consolidateVisitsForPatient(prof.rawDocs, defaultPat);
+    list.push({
+      profileKey: prof.profileKey,
+      name: prof.name,
+      regId: prof.regId,
+      phone: prof.phone,
+      branch: prof.branch,
+      age: prof.age,
+      gender: prof.gender,
+      primaryDocId: prof.primaryDocId,
+      visits: consolidated,
+      rawDocs: prof.rawDocs,
+    });
+  });
+
+  if (list.length === 0) {
+    const defConsolidated = consolidateVisitsForPatient(docs, defaultPat);
+    list.push({
+      profileKey: defaultPat.id,
+      name: defaultPat.name,
+      regId: defaultPat.regId || defaultPat.id,
+      phone: defaultPat.phone,
+      branch: defaultPat.branchName,
+      primaryDocId: defaultPat.id,
+      visits: defConsolidated,
+      rawDocs: docs,
+    });
+  }
+
+  // Sort profiles so the matching patient profile is first
+  const normDefaultName = defaultPat.name.replace(/^(mr|mrs|ms|dr|master|miss)\.?\s+/i, '').trim().toLowerCase();
+  list.sort((a, b) => {
+    const matchA = (a.regId && a.regId.toLowerCase() === cleanDefaultReg.toLowerCase()) || (a.name.toLowerCase().includes(normDefaultName));
+    const matchB = (b.regId && b.regId.toLowerCase() === cleanDefaultReg.toLowerCase()) || (b.name.toLowerCase().includes(normDefaultName));
+    if (matchA && !matchB) return -1;
+    if (!matchA && matchB) return 1;
+    return 0;
+  });
+
+  return list;
 };
 
 // --- Memoized Individual Patient Card Component ---
@@ -552,7 +892,7 @@ const PatientCardItem = memo(({
         </View>
         <View style={styles.detailItem}>
           <Feather name="calendar" size={13} color="#64748b" />
-          <Text style={styles.detailText}>{patient.appointmentDate}</Text>
+          <Text style={styles.detailText}>{formatPrettyDate(patient.appointmentDate)}</Text>
         </View>
         {patient.doctorName ? (
           <View style={styles.detailItem}>
@@ -566,10 +906,15 @@ const PatientCardItem = memo(({
       <View style={styles.actionRow}>
         <Text style={styles.phoneText}>📞 {patient.phone}</Text>
         <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
-          <View style={styles.viewHistoryPill}>
+          <TouchableOpacity
+            style={styles.viewHistoryPill}
+            onPress={() => onPress(patient)}
+            activeOpacity={0.7}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
             <Text style={styles.viewHistoryPillText}>History & Rx</Text>
             <Feather name="chevron-right" size={13} color="#0284c7" />
-          </View>
+          </TouchableOpacity>
           {patient.phone ? (
             <>
               <TouchableOpacity
@@ -594,7 +939,12 @@ const PatientCardItem = memo(({
   );
 });
 
-export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate, currentBranch }) => {
+export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({
+  onNavigate,
+  currentBranch,
+  onBack,
+  isActive = true,
+}) => {
   // --- Filtering States ---
   const [searchTerm, setSearchTerm] = useState('');
   const [dateFilterMode, setDateFilterMode] = useState<'today' | 'yesterday' | 'all'>('today');
@@ -663,16 +1013,34 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
         const queriesToRun: any[] = [];
         if (isPhoneSearch) {
           const tenDigit = cleanDigits.slice(-10);
+          const pVariants = Array.from(new Set([
+            tenDigit,
+            `+91${tenDigit}`,
+            `+91 ${tenDigit}`,
+            `0${tenDigit}`,
+            `${tenDigit.slice(0, 5)} ${tenDigit.slice(5)}`
+          ])).filter(Boolean).slice(0, 10);
+
           queriesToRun.push(
-            getDocs(query(collection(activeDb, 'patients'), where('phone', '==', tenDigit), limit(20))).catch(() => ({ docs: [] })),
-            getDocs(query(collection(activeDb, 'allpatients'), where('phone', '==', tenDigit), limit(20))).catch(() => ({ docs: [] })),
-            getDocs(query(collection(activeDb, 'appointments'), where('phone', '==', tenDigit), limit(20))).catch(() => ({ docs: [] }))
+            getDocs(query(collection(activeDb, 'allpatients'), where('phone', 'in', pVariants), limit(20))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'allpatients'), where('phoneNumber', 'in', pVariants), limit(20))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'patients'), where('phone', 'in', pVariants), limit(20))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'patients'), where('phoneNumber', 'in', pVariants), limit(20))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'appointments'), where('phone', 'in', pVariants), limit(20))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'appointments'), where('phoneNumber', 'in', pVariants), limit(20))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'patient_profiles'), where('phone', 'in', pVariants), limit(20))).catch(() => ({ docs: [] }))
           );
         } else {
+          const rVariants = Array.from(new Set([trimmed, trimmed.toUpperCase(), trimmed.toLowerCase()])).filter(Boolean).slice(0, 10);
           queriesToRun.push(
-            getDocs(query(collection(activeDb, 'patients'), where('registrationId', '==', trimmed), limit(20))).catch(() => ({ docs: [] })),
-            getDocs(query(collection(activeDb, 'allpatients'), where('registrationId', '==', trimmed), limit(20))).catch(() => ({ docs: [] })),
-            getDocs(query(collection(activeDb, 'patients'), where('regNo', '==', trimmed), limit(20))).catch(() => ({ docs: [] }))
+            getDocs(query(collection(activeDb, 'allpatients'), where('registrationId', 'in', rVariants), limit(20))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'allpatients'), where('regId', 'in', rVariants), limit(20))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'patients'), where('registrationId', 'in', rVariants), limit(20))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'patients'), where('regNo', 'in', rVariants), limit(20))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'patients'), where('regId', 'in', rVariants), limit(20))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'appointments'), where('registrationId', 'in', rVariants), limit(20))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'appointments'), where('regId', 'in', rVariants), limit(20))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'patient_profiles'), where('registrationId', 'in', rVariants), limit(20))).catch(() => ({ docs: [] }))
           );
         }
 
@@ -693,6 +1061,22 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
               if (isHQRole || !currentBranch || isBranchMatching(bName, currentBranch)) {
                 existingIds.add(docSnap.id);
                 if (cleanP) existingPhones.add(cleanP);
+                const s = String(d.status || '').toLowerCase().trim();
+                const p = String(d.paymentStatus || '').toLowerCase().trim();
+                let docStatus = 'active';
+                if (s === 'completed' || s === 'done' || s === 'paid' || p === 'paid') {
+                  docStatus = 'completed';
+                } else if (s === 'follow_up' || s === 'followup') {
+                  docStatus = 'follow_up';
+                } else if (s === 'collect_fee' || s === 'awaiting_payment' || p === 'pending') {
+                  docStatus = 'awaiting_payment';
+                }
+
+                const docDate = normalizeDateToISO(d.appointmentDate || d.date || d.bookingDate || d.createdAt);
+                if (docDate > todayStr && docStatus !== 'completed') {
+                  return;
+                }
+
                 newRecords.push({
                   id: docSnap.id,
                   name: d.patientName || d.name || d.fullName || 'Patient',
@@ -700,10 +1084,10 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
                   age: d.age || d.patientAge,
                   gender: d.gender || 'Male',
                   branchName: bName,
-                  appointmentDate: normalizeDateToISO(d.appointmentDate || d.date || d.bookingDate || d.createdAt),
+                  appointmentDate: docDate,
                   appointmentTime: d.appointmentTime || d.time || '10:00 AM',
                   doctorName: sanitizeDoctorName(d.doctorName || d.doctor, bName),
-                  status: 'active',
+                  status: docStatus,
                   regId: d.registrationId || d.regId || d.regNo || d.patientId || docSnap.id,
                   raw: { ...d, id: docSnap.id, collectionName: 'patients' }
                 });
@@ -791,6 +1175,471 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
   const [isLoadingHistory, setIsLoadingHistory] = useState<boolean>(false);
   const [historyFilterTab, setHistoryFilterTab] = useState<'all' | 'prescriptions' | 'billing'>('all');
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+  const [historySortOrder, setHistorySortOrder] = useState<'desc' | 'asc'>('desc');
+
+  // Multi-profile state for family members under same phone number
+  const [patientProfiles, setPatientProfiles] = useState<PatientFamilyProfile[]>([]);
+  const [selectedProfileKey, setSelectedProfileKey] = useState<string>('');
+
+  // Upload Prescription Modal State
+  const [uploadModalVisible, setUploadModalVisible] = useState<boolean>(false);
+  const [uploadTargetDate, setUploadTargetDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [uploadTargetProfileKey, setUploadTargetProfileKey] = useState<string>('');
+  const [uploadImageUri, setUploadImageUri] = useState<string | null>(null);
+  const [uploadImageBase64, setUploadImageBase64] = useState<string | null>(null);
+  const [isUploadingPrescription, setIsUploadingPrescription] = useState<boolean>(false);
+
+  // Lightbox rotation & swipe navigation state
+  const [lightboxImages, setLightboxImages] = useState<string[]>([]);
+  const [lightboxIndex, setLightboxIndex] = useState<number>(0);
+  const [imageRotation, setImageRotation] = useState<number>(0);
+
+  // Delete / Remove Prescription Image Confirmation State
+  const [imageToDelete, setImageToDelete] = useState<{
+    uri: string;
+    visitNumber?: number;
+    visitDate?: string;
+    imageIndex?: number;
+    visitId?: string;
+  } | null>(null);
+  const [isDeletingImage, setIsDeletingImage] = useState<boolean>(false);
+
+  const openLightbox = useCallback((images: string[], index: number = 0) => {
+    if (!images || images.length === 0) return;
+    const safeIdx = Math.max(0, Math.min(index, images.length - 1));
+    setLightboxImages(images);
+    setLightboxIndex(safeIdx);
+    setImageRotation(0);
+    setImagePreviewUrl(images[safeIdx] || images[0]);
+  }, []);
+
+  const closeLightbox = useCallback(() => {
+    setImagePreviewUrl(null);
+    setLightboxImages([]);
+    setLightboxIndex(0);
+    setImageRotation(0);
+  }, []);
+
+  const handleRotateImage = useCallback(() => {
+    setImageRotation(prev => (prev + 90) % 360);
+  }, []);
+
+  const handlePrevImage = useCallback(() => {
+    setLightboxImages(currentList => {
+      if (currentList.length <= 1) return currentList;
+      setLightboxIndex(prevIdx => {
+        const newIdx = prevIdx > 0 ? prevIdx - 1 : currentList.length - 1;
+        setImageRotation(0);
+        setImagePreviewUrl(currentList[newIdx]);
+        return newIdx;
+      });
+      return currentList;
+    });
+  }, []);
+
+  const handleNextImage = useCallback(() => {
+    setLightboxImages(currentList => {
+      if (currentList.length <= 1) return currentList;
+      setLightboxIndex(prevIdx => {
+        const newIdx = prevIdx < currentList.length - 1 ? prevIdx + 1 : 0;
+        setImageRotation(0);
+        setImagePreviewUrl(currentList[newIdx]);
+        return newIdx;
+      });
+      return currentList;
+    });
+  }, []);
+
+  const panResponder = useMemo(() => {
+    return PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_, gestureState) => {
+        return Math.abs(gestureState.dx) > 25 && Math.abs(gestureState.dy) < 55;
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        if (gestureState.dx > 45) {
+          // Swiped right -> Previous image
+          handlePrevImage();
+        } else if (gestureState.dx < -45) {
+          // Swiped left -> Next image
+          handleNextImage();
+        }
+      },
+    });
+  }, [handlePrevImage, handleNextImage]);
+
+  // Active Profile derivation for currently selected profile
+  const activeProfile = useMemo(() => {
+    return patientProfiles.find(p => p.profileKey === selectedProfileKey) || patientProfiles[0] || null;
+  }, [patientProfiles, selectedProfileKey]);
+
+  // Active Visits for selected profile (isolated per person)
+  const activeProfileVisits = useMemo(() => {
+    if (activeProfile && activeProfile.visits && activeProfile.visits.length > 0) {
+      return activeProfile.visits;
+    }
+    return historyVisits;
+  }, [activeProfile, historyVisits]);
+
+  // Open Prescription Upload Modal
+  const handleOpenUploadModal = useCallback(() => {
+    setUploadTargetDate(new Date().toISOString().split('T')[0]);
+    setUploadTargetProfileKey(activeProfile?.profileKey || selectedProfileKey || '');
+    setUploadImageUri(null);
+    setUploadImageBase64(null);
+    setUploadModalVisible(true);
+  }, [activeProfile, selectedProfileKey]);
+
+  const handlePickFromGallery = useCallback(async () => {
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permission Denied', 'Please grant photo library access to upload prescriptions.');
+        return;
+      }
+      const res = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsMultipleSelection: false,
+        quality: 0.6,
+        base64: true,
+      });
+      if (!res.canceled && res.assets && res.assets.length > 0) {
+        setUploadImageUri(res.assets[0].uri);
+        if (res.assets[0].base64) {
+          setUploadImageBase64(`data:image/jpeg;base64,${res.assets[0].base64}`);
+        }
+      }
+    } catch (e) {
+      Alert.alert('Gallery Error', 'Failed to pick image.');
+    }
+  }, []);
+
+  const handleTakePhoto = useCallback(async () => {
+    try {
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permission Denied', 'Please grant camera access to photograph prescriptions.');
+        return;
+      }
+      const res = await ImagePicker.launchCameraAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.6,
+        base64: true,
+      });
+      if (!res.canceled && res.assets && res.assets.length > 0) {
+        setUploadImageUri(res.assets[0].uri);
+        if (res.assets[0].base64) {
+          setUploadImageBase64(`data:image/jpeg;base64,${res.assets[0].base64}`);
+        }
+      }
+    } catch (e) {
+      Alert.alert('Camera Error', 'Failed to capture photo.');
+    }
+  }, []);
+
+  const handleSaveUploadedPrescription = useCallback(async () => {
+    if (!uploadImageUri) {
+      Alert.alert('No Image', 'Please capture or select a prescription image first.');
+      return;
+    }
+    const cleanDate = uploadTargetDate.trim() || new Date().toISOString().split('T')[0];
+    const targetProf = patientProfiles.find(p => p.profileKey === uploadTargetProfileKey) || activeProfile || {
+      name: selectedPatientForHistory?.name || 'Patient',
+      phone: selectedPatientForHistory?.phone || '',
+      regId: selectedPatientForHistory?.regId || '',
+      branch: selectedPatientForHistory?.branchName || currentBranch || 'Clinic',
+      primaryDocId: selectedPatientForHistory?.id || 'temp',
+    };
+
+    setIsUploadingPrescription(true);
+    try {
+      const dataToUpload = uploadImageBase64 || uploadImageUri;
+      const targetDocId = (targetProf as any).primaryDocId || selectedPatientForHistory?.id || `rx_${Date.now()}`;
+      const cloudUrl = await uploadPrescriptionToStorage(dataToUpload, targetDocId);
+
+      if (!cloudUrl) {
+        throw new Error('Upload to storage failed');
+      }
+
+      const activeDb = getSafeDb();
+      if (activeDb) {
+        const colsToUpdate = ['appointments', 'allpatients', 'patients', 'patient_profiles'];
+        for (const colName of colsToUpdate) {
+          try {
+            await updateDoc(doc(activeDb, colName, targetDocId), {
+              uploadedPrescriptions: arrayUnion(cloudUrl),
+              prescriptionImages: arrayUnion(cloudUrl),
+              updatedAt: new Date().toISOString(),
+            }).catch(() => {});
+          } catch (_) {}
+        }
+
+        try {
+          const appointmentRef = doc(collection(activeDb, 'allpatients'));
+          await setDoc(appointmentRef, {
+            patientName: targetProf.name,
+            fullName: targetProf.name,
+            phone: targetProf.phone,
+            phoneNumber: targetProf.phone,
+            regId: targetProf.regId,
+            registrationId: targetProf.regId,
+            branchName: targetProf.branch || currentBranch || 'Clinic',
+            appointmentDate: cleanDate,
+            date: cleanDate,
+            appointmentTime: '10:00 AM',
+            status: 'completed',
+            uploadedPrescriptions: [cloudUrl],
+            prescriptionImages: [cloudUrl],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }, { merge: true }).catch(() => {});
+        } catch (_) {}
+      }
+
+      // Update state locally so new prescription shows in 2x2 grid immediately
+      setPatientProfiles(prevProfiles => {
+        return prevProfiles.map(prof => {
+          if (prof.profileKey !== (targetProf as any).profileKey && prof.name !== targetProf.name) {
+            return prof;
+          }
+          const visits = [...prof.visits];
+          const existingVisit = visits.find(v => v.date === cleanDate);
+          if (existingVisit) {
+            existingVisit.prescriptionImages = Array.from(new Set([...(existingVisit.prescriptionImages || []), cloudUrl]));
+          } else {
+            visits.unshift({
+              id: `upload_${Date.now()}`,
+              date: cleanDate,
+              time: '10:00 AM',
+              branch: targetProf.branch || currentBranch || 'Clinic',
+              doctor: 'Homeopathic Doctor',
+              status: 'completed',
+              totalAmount: 0,
+              amountPaid: 0,
+              paymentMode: 'Cash',
+              paymentStatus: 'paid',
+              prescriptionImages: [cloudUrl],
+              medicines: [],
+              visitNumber: visits.length + 1,
+            });
+          }
+          return { ...prof, visits };
+        });
+      });
+
+      setUploadModalVisible(false);
+      setUploadImageUri(null);
+      setUploadImageBase64(null);
+      Alert.alert('Prescription Uploaded ✓', `Prescription attached successfully for ${targetProf.name} on ${cleanDate}.`);
+    } catch (err: any) {
+      console.error('Upload error:', err);
+      Alert.alert('Upload Failed', err?.message || 'Unable to upload prescription.');
+    } finally {
+      setIsUploadingPrescription(false);
+    }
+  }, [uploadImageUri, uploadImageBase64, uploadTargetDate, uploadTargetProfileKey, patientProfiles, activeProfile, selectedPatientForHistory, currentBranch]);
+
+  // Handler to permanently delete/remove prescription image from records
+  const handleConfirmDeleteImage = useCallback(async () => {
+    if (!imageToDelete || !imageToDelete.uri) {
+      setImageToDelete(null);
+      return;
+    }
+
+    const targetUri = imageToDelete.uri;
+    setIsDeletingImage(true);
+
+    try {
+      const activeDb = getSafeDb();
+      const targetProf = activeProfile || {
+        name: selectedPatientForHistory?.name || 'Patient',
+        phone: selectedPatientForHistory?.phone || '',
+        regId: selectedPatientForHistory?.regId || '',
+        branch: selectedPatientForHistory?.branchName || currentBranch || 'Clinic',
+        primaryDocId: selectedPatientForHistory?.id || 'temp',
+      };
+
+      // 1. Collect all candidate doc IDs
+      const candidateDocIds = new Set<string>();
+      if (selectedPatientForHistory?.id) candidateDocIds.add(selectedPatientForHistory.id);
+      if (selectedPatientForHistory?.raw?.id) candidateDocIds.add(selectedPatientForHistory.raw.id);
+      if ((targetProf as any).primaryDocId) candidateDocIds.add((targetProf as any).primaryDocId);
+      if (imageToDelete.visitId) candidateDocIds.add(imageToDelete.visitId);
+
+      if ((targetProf as any).rawDocs && Array.isArray((targetProf as any).rawDocs)) {
+        (targetProf as any).rawDocs.forEach((d: any) => {
+          if (d?.id) candidateDocIds.add(d.id);
+          if (d?.docId) candidateDocIds.add(d.docId);
+        });
+      }
+
+      if (activeDb) {
+        const collectionsToCheck = ['appointments', 'allpatients', 'patients', 'patient_profiles', 'prescriptions'];
+
+        // A. Search collections where array fields contain targetUri
+        for (const colName of collectionsToCheck) {
+          try {
+            const qU = query(collection(activeDb, colName), where('uploadedPrescriptions', 'array-contains', targetUri));
+            const snapU = await getDocs(qU).catch(() => ({ docs: [] } as any));
+            snapU.docs.forEach((d: any) => candidateDocIds.add(d.id));
+
+            const qP = query(collection(activeDb, colName), where('prescriptionImages', 'array-contains', targetUri));
+            const snapP = await getDocs(qP).catch(() => ({ docs: [] } as any));
+            snapP.docs.forEach((d: any) => candidateDocIds.add(d.id));
+
+            const qR = query(collection(activeDb, colName), where('prescriptionUrls', 'array-contains', targetUri));
+            const snapR = await getDocs(qR).catch(() => ({ docs: [] } as any));
+            snapR.docs.forEach((d: any) => candidateDocIds.add(d.id));
+          } catch (_) {}
+        }
+
+        // B. Remove targetUri from array and scalar fields in all matched documents
+        for (const docId of Array.from(candidateDocIds)) {
+          for (const colName of collectionsToCheck) {
+            try {
+              const docRef = doc(activeDb, colName, docId);
+              const docSnap = await getDoc(docRef).catch(() => null);
+              if (docSnap && docSnap.exists()) {
+                const data = docSnap.data();
+                const updates: any = {
+                  uploadedPrescriptions: arrayRemove(targetUri),
+                  prescriptionImages: arrayRemove(targetUri),
+                  prescriptionUrls: arrayRemove(targetUri),
+                  images: arrayRemove(targetUri),
+                  reports: arrayRemove(targetUri),
+                  rxUrls: arrayRemove(targetUri),
+                  updatedAt: new Date().toISOString(),
+                };
+                if (data.prescriptionUrl === targetUri) updates.prescriptionUrl = '';
+                if (data.prescriptionImage === targetUri) updates.prescriptionImage = '';
+                if (data.canvasPrescriptionUrl === targetUri) updates.canvasPrescriptionUrl = '';
+                if (data.canvasUrl === targetUri) updates.canvasUrl = '';
+                if (data.rxUrl === targetUri) updates.rxUrl = '';
+
+                await updateDoc(docRef, updates).catch(() => {});
+
+                try {
+                  receptionDataStore.updateLocalAppointment(docId, updates);
+                } catch (_) {}
+              }
+            } catch (_) {}
+          }
+        }
+      }
+
+      // 2. Update local state: remove targetUri from patientProfiles
+      setPatientProfiles(prevProfiles => {
+        return prevProfiles.map(prof => {
+          const updatedVisits = prof.visits.map(v => {
+            if (!v.prescriptionImages || !v.prescriptionImages.includes(targetUri)) {
+              return v;
+            }
+            return {
+              ...v,
+              prescriptionImages: v.prescriptionImages.filter(u => u !== targetUri),
+            };
+          });
+
+          const updatedRawDocs = (prof.rawDocs || []).map((d: any) => {
+            const newDoc = { ...d };
+            if (Array.isArray(newDoc.uploadedPrescriptions)) {
+              newDoc.uploadedPrescriptions = newDoc.uploadedPrescriptions.filter((u: string) => u !== targetUri);
+            }
+            if (Array.isArray(newDoc.prescriptionImages)) {
+              newDoc.prescriptionImages = newDoc.prescriptionImages.filter((u: string) => u !== targetUri);
+            }
+            if (Array.isArray(newDoc.prescriptionUrls)) {
+              newDoc.prescriptionUrls = newDoc.prescriptionUrls.filter((u: string) => u !== targetUri);
+            }
+            return newDoc;
+          });
+
+          return {
+            ...prof,
+            visits: updatedVisits,
+            rawDocs: updatedRawDocs,
+          };
+        });
+      });
+
+      // 3. Update local historyVisits
+      setHistoryVisits(prevVisits => {
+        return prevVisits.map(v => {
+          if (!v.prescriptionImages || !v.prescriptionImages.includes(targetUri)) {
+            return v;
+          }
+          return {
+            ...v,
+            prescriptionImages: v.prescriptionImages.filter(u => u !== targetUri),
+          };
+        });
+      });
+
+      // 4. Update Lightbox state if image was deleted from within lightbox
+      setLightboxImages(prevImages => {
+        const filtered = prevImages.filter(u => u !== targetUri);
+        if (filtered.length === 0) {
+          closeLightbox();
+        } else {
+          const nextIdx = Math.min(lightboxIndex, filtered.length - 1);
+          setLightboxIndex(nextIdx);
+          setImagePreviewUrl(filtered[nextIdx]);
+        }
+        return filtered;
+      });
+
+      // 5. Close confirmation popup
+      setImageToDelete(null);
+
+      // 6. Give feedback
+      if (Platform.OS === 'android') {
+        ToastAndroid.show('Prescription image removed', ToastAndroid.SHORT);
+      } else {
+        Alert.alert('Removed', 'Prescription image removed successfully.');
+      }
+    } catch (err: any) {
+      console.error('Delete image error:', err);
+      Alert.alert('Error', err?.message || 'Failed to remove image. Please try again.');
+    } finally {
+      setIsDeletingImage(false);
+    }
+  }, [imageToDelete, activeProfile, selectedPatientForHistory, currentBranch, lightboxIndex, closeLightbox]);
+
+  // Native Android Hardware Back Navigation Handler
+  useEffect(() => {
+    if (!isActive) return;
+
+    const onHardwareBack = () => {
+      if (imageToDelete) {
+        setImageToDelete(null);
+        return true;
+      }
+      if (uploadModalVisible) {
+        setUploadModalVisible(false);
+        return true;
+      }
+      if (imagePreviewUrl) {
+        closeLightbox();
+        return true;
+      }
+      if (selectedPatientForHistory) {
+        handleCloseHistoryModal();
+        return true;
+      }
+      if (onBack) {
+        onBack();
+        return true;
+      }
+      if (onNavigate) {
+        onNavigate('reception_dashboard');
+        return true;
+      }
+      return true;
+    };
+
+    const backSub = BackHandler.addEventListener('hardwareBackPress', onHardwareBack);
+    return () => backSub.remove();
+  }, [isActive, selectedPatientForHistory, imagePreviewUrl, uploadModalVisible, imageToDelete, closeLightbox, onBack, onNavigate]);
 
   // --- Handlers ---
   const handleOpenPatientFile = useCallback((patient: Patient, targetVisit?: PatientVisitHistoryItem) => {
@@ -856,10 +1705,22 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
       .catch(() => Alert.alert('WhatsApp Error', 'Could not launch WhatsApp.'));
   }, []);
 
+  const currentOpenPatientIdRef = React.useRef<string | null>(null);
+
+  const handleCloseHistoryModal = useCallback(() => {
+    currentOpenPatientIdRef.current = null;
+    setSelectedPatientForHistory(null);
+    setIsLoadingHistory(false);
+  }, []);
+
   // --- Load Full Patient History Across All Visits & Collections ---
   const handleOpenPatientHistory = useCallback(async (patient: Patient) => {
+    if (!patient) return;
+    const patientIdentifier = String(patient.id || patient.regId || patient.phone || Math.random());
+    currentOpenPatientIdRef.current = patientIdentifier;
     setSelectedPatientForHistory(patient);
     setHistoryFilterTab('all');
+    setHistorySortOrder('desc');
     setIsLoadingHistory(true);
 
     const cleanPhone = String(patient.phone || '').replace(/\D/g, '').slice(-10);
@@ -903,28 +1764,109 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
       }
     }
 
-    // Consolidated visits from in-memory pool (Zero network delay)
-    const initialVisits = consolidateVisitsForPatient(collectedDocs, patient);
-    setHistoryVisits(initialVisits);
+    // Group documents into distinct profiles under this phone number / patient
+    const initialProfiles = groupDocsByProfile(collectedDocs, patient);
+    setPatientProfiles(initialProfiles);
+    if (initialProfiles.length > 0) {
+      setSelectedProfileKey(initialProfiles[0].profileKey);
+      setHistoryVisits(initialProfiles[0].visits);
+    }
 
     // 2. Concurrently query Firestore for any other historical records across collections
     try {
       const activeDb = getSafeDb();
       if (activeDb) {
         const queryPromises: any[] = [];
-        if (cleanPhone && cleanPhone.length === 10) {
+
+        // 1. Direct document fetches by ID
+        const docIdsToFetch = Array.from(new Set([patient.id, patient.raw?.id, patient.raw?.docId])).filter(Boolean);
+        for (const docId of docIdsToFetch) {
           queryPromises.push(
-            getDocs(query(collection(activeDb, 'appointments'), where('phone', '==', cleanPhone), limit(30))).catch(() => ({ docs: [] })),
-            getDocs(query(collection(activeDb, 'appointments'), where('phoneNumber', '==', cleanPhone), limit(30))).catch(() => ({ docs: [] })),
-            getDocs(query(collection(activeDb, 'prescriptions'), where('phone', '==', cleanPhone), limit(30))).catch(() => ({ docs: [] })),
-            getDocs(query(collection(activeDb, 'prescriptions'), where('patientPhone', '==', cleanPhone), limit(30))).catch(() => ({ docs: [] })),
-            getDocs(query(collection(activeDb, 'product_bills'), where('phone', '==', cleanPhone), limit(20))).catch(() => ({ docs: [] }))
+            getDoc(doc(activeDb, 'allpatients', docId)).then(s => ({ docs: s.exists() ? [{ id: s.id, data: () => s.data() }] : [] })).catch(() => ({ docs: [] })),
+            getDoc(doc(activeDb, 'patients', docId)).then(s => ({ docs: s.exists() ? [{ id: s.id, data: () => s.data() }] : [] })).catch(() => ({ docs: [] })),
+            getDoc(doc(activeDb, 'appointments', docId)).then(s => ({ docs: s.exists() ? [{ id: s.id, data: () => s.data() }] : [] })).catch(() => ({ docs: [] })),
+            getDoc(doc(activeDb, 'patient_profiles', docId)).then(s => ({ docs: s.exists() ? [{ id: s.id, data: () => s.data() }] : [] })).catch(() => ({ docs: [] }))
           );
         }
-        if (cleanReg && cleanReg.length > 3) {
+
+        // 2. Query by Phone Variants across ALL patient collections & fields
+        if (cleanPhone && cleanPhone.length === 10) {
+          const phoneVariants = Array.from(new Set([
+            cleanPhone,
+            `+91${cleanPhone}`,
+            `+91 ${cleanPhone}`,
+            `+91-${cleanPhone}`,
+            `0${cleanPhone}`,
+            `${cleanPhone.slice(0, 5)} ${cleanPhone.slice(5)}`,
+            `+91 ${cleanPhone.slice(0, 5)} ${cleanPhone.slice(5)}`
+          ])).filter(Boolean).slice(0, 10);
+
           queryPromises.push(
-            getDocs(query(collection(activeDb, 'appointments'), where('registrationId', '==', patient.regId), limit(20))).catch(() => ({ docs: [] })),
-            getDocs(query(collection(activeDb, 'prescriptions'), where('registrationId', '==', patient.regId), limit(20))).catch(() => ({ docs: [] }))
+            // allpatients (Primary patient directory)
+            getDocs(query(collection(activeDb, 'allpatients'), where('phone', 'in', phoneVariants), limit(35))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'allpatients'), where('phoneNumber', 'in', phoneVariants), limit(35))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'allpatients'), where('patientPhone', 'in', phoneVariants), limit(35))).catch(() => ({ docs: [] })),
+
+            // patients (Master patient registration collection)
+            getDocs(query(collection(activeDb, 'patients'), where('phone', 'in', phoneVariants), limit(35))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'patients'), where('phoneNumber', 'in', phoneVariants), limit(35))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'patients'), where('patientPhone', 'in', phoneVariants), limit(35))).catch(() => ({ docs: [] })),
+
+            // appointments (Clinic visits & slots)
+            getDocs(query(collection(activeDb, 'appointments'), where('phone', 'in', phoneVariants), limit(35))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'appointments'), where('phoneNumber', 'in', phoneVariants), limit(35))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'appointments'), where('patientPhone', 'in', phoneVariants), limit(35))).catch(() => ({ docs: [] })),
+
+            // patient_profiles (Multi-profile family members)
+            getDocs(query(collection(activeDb, 'patient_profiles'), where('phone', 'in', phoneVariants), limit(25))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'patient_profiles'), where('patientPhone', 'in', phoneVariants), limit(25))).catch(() => ({ docs: [] })),
+
+            // prescriptions (Clinical prescriptions & uploads)
+            getDocs(query(collection(activeDb, 'prescriptions'), where('phone', 'in', phoneVariants), limit(35))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'prescriptions'), where('patientPhone', 'in', phoneVariants), limit(35))).catch(() => ({ docs: [] })),
+
+            // product_bills (In-clinic billing)
+            getDocs(query(collection(activeDb, 'product_bills'), where('phone', 'in', phoneVariants), limit(25))).catch(() => ({ docs: [] })),
+
+            // alltransactions (Revenue & receipt collection)
+            getDocs(query(collection(activeDb, 'alltransactions'), where('phone', 'in', phoneVariants), limit(25))).catch(() => ({ docs: [] }))
+          );
+        }
+
+        // 3. Query by Registration ID Variants across ALL collections & ID fields
+        const rawReg = String(patient.regId || '').trim();
+        const rawPatId = String(patient.id || '').trim();
+        const regVariants = Array.from(new Set([
+          rawReg,
+          rawReg.toUpperCase(),
+          rawReg.toLowerCase(),
+          rawPatId,
+          rawPatId.toUpperCase(),
+          rawPatId.toLowerCase(),
+        ])).filter(r => r && r.length > 2 && !r.startsWith('upload_')).slice(0, 10);
+
+        if (regVariants.length > 0) {
+          queryPromises.push(
+            // allpatients
+            getDocs(query(collection(activeDb, 'allpatients'), where('registrationId', 'in', regVariants), limit(25))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'allpatients'), where('regId', 'in', regVariants), limit(25))).catch(() => ({ docs: [] })),
+
+            // patients
+            getDocs(query(collection(activeDb, 'patients'), where('registrationId', 'in', regVariants), limit(25))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'patients'), where('regId', 'in', regVariants), limit(25))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'patients'), where('regNo', 'in', regVariants), limit(25))).catch(() => ({ docs: [] })),
+
+            // appointments
+            getDocs(query(collection(activeDb, 'appointments'), where('registrationId', 'in', regVariants), limit(25))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'appointments'), where('regId', 'in', regVariants), limit(25))).catch(() => ({ docs: [] })),
+
+            // patient_profiles
+            getDocs(query(collection(activeDb, 'patient_profiles'), where('registrationId', 'in', regVariants), limit(25))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'patient_profiles'), where('regId', 'in', regVariants), limit(25))).catch(() => ({ docs: [] })),
+
+            // prescriptions
+            getDocs(query(collection(activeDb, 'prescriptions'), where('registrationId', 'in', regVariants), limit(25))).catch(() => ({ docs: [] })),
+            getDocs(query(collection(activeDb, 'prescriptions'), where('regId', 'in', regVariants), limit(25))).catch(() => ({ docs: [] }))
           );
         }
 
@@ -939,8 +1881,21 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
           });
         });
 
-        const mergedVisits = consolidateVisitsForPatient(collectedDocs, patient);
-        setHistoryVisits(mergedVisits);
+        if (currentOpenPatientIdRef.current !== patientIdentifier) {
+          return;
+        }
+
+        const mergedProfiles = groupDocsByProfile(collectedDocs, patient);
+        setPatientProfiles(mergedProfiles);
+        if (mergedProfiles.length > 0) {
+          setSelectedProfileKey(prevKey => {
+            if (prevKey && mergedProfiles.some(p => p.profileKey === prevKey)) {
+              return prevKey;
+            }
+            return mergedProfiles[0].profileKey;
+          });
+          setHistoryVisits(mergedProfiles[0].visits);
+        }
       }
     } catch (err) {
       console.warn('Error loading patient full history:', err);
@@ -952,24 +1907,64 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
   // Financial aggregation across patient visits
   const totalPaidSum = useMemo(() => {
     let sum = 0;
-    historyVisits.forEach(v => {
+    activeProfileVisits.forEach(v => {
       if (v.amountPaid > 0) {
         sum += v.amountPaid;
       }
     });
     return sum;
-  }, [historyVisits]);
+  }, [activeProfileVisits]);
 
-  // Tab filtering within history modal
+  // Sorted visits based on user's sorting order: 'desc' (Last to First / Newest) or 'asc' (First to Last / Oldest)
+  const sortedHistoryVisits = useMemo(() => {
+    const list = [...activeProfileVisits];
+    list.sort((a, b) => {
+      const cmp = String(b.date || '').localeCompare(String(a.date || ''));
+      return historySortOrder === 'desc' ? cmp : -cmp;
+    });
+    return list;
+  }, [activeProfileVisits, historySortOrder]);
+
+  // Flatten all prescription images across all visits, sorted according to historySortOrder
+  const allVisitedPrescriptionImages = useMemo(() => {
+    const list: Array<{
+      uri: string;
+      visitNumber: number;
+      visitDate: string;
+      visitTime: string;
+      doctor?: string;
+      branch?: string;
+      imageIndex: number;
+      visitId?: string;
+    }> = [];
+
+    sortedHistoryVisits.forEach((v) => {
+      const vNum = v.visitNumber || 1;
+      (v.prescriptionImages || []).forEach((uri, iIdx) => {
+        list.push({
+          uri,
+          visitNumber: vNum,
+          visitDate: v.date,
+          visitTime: v.time,
+          doctor: v.doctor,
+          branch: v.branch,
+          imageIndex: iIdx + 1,
+          visitId: v.id,
+        });
+      });
+    });
+
+    return list;
+  }, [sortedHistoryVisits]);
+
+  // Tab filtering within history modal using sorted visits
   const filteredHistoryVisits = useMemo(() => {
-    if (historyFilterTab === 'prescriptions') {
-      return historyVisits.filter(v => v.medicines.length > 0 || v.prescriptionImages.length > 0 || v.diagnosisNotes || v.doctorNotes);
-    }
     if (historyFilterTab === 'billing') {
-      return historyVisits.filter(v => v.amountPaid > 0 || v.paymentMode);
+      const billOnly = sortedHistoryVisits.filter(v => v.amountPaid > 0 || v.paymentMode || v.consultationFee || v.medicineFee);
+      return billOnly.length > 0 ? billOnly : sortedHistoryVisits;
     }
-    return historyVisits;
-  }, [historyVisits, historyFilterTab]);
+    return sortedHistoryVisits;
+  }, [sortedHistoryVisits, historyFilterTab]);
 
   return (
     <View style={styles.container}>
@@ -1083,10 +2078,10 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
       {/* FULL-SCREEN POPUP: COMPLETE PATIENT HISTORY, PAID AMOUNT & PRESCRIPTIONS  */}
       {/* ========================================================================= */}
       <Modal
-        visible={!!selectedPatientForHistory}
+        visible={Boolean(selectedPatientForHistory)}
         animationType="slide"
         presentationStyle="fullScreen"
-        onRequestClose={() => setSelectedPatientForHistory(null)}
+        onRequestClose={handleCloseHistoryModal}
       >
         {selectedPatientForHistory && (
           <SafeAreaView style={styles.historyModalSafeArea}>
@@ -1095,7 +2090,7 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
             <View style={styles.historyModalHeader}>
               <TouchableOpacity
                 style={styles.historyBackBtn}
-                onPress={() => setSelectedPatientForHistory(null)}
+                onPress={handleCloseHistoryModal}
                 activeOpacity={0.7}
               >
                 <Feather name="arrow-left" size={22} color="#0f172a" />
@@ -1103,10 +2098,10 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
 
               <View style={{ flex: 1, marginHorizontal: 10 }}>
                 <Text style={styles.historyHeaderTitle} numberOfLines={1}>
-                  {selectedPatientForHistory.name}
+                  {activeProfile?.name || selectedPatientForHistory.name}
                 </Text>
                 <Text style={styles.historyHeaderSubtitle}>
-                  ID: {selectedPatientForHistory.regId || selectedPatientForHistory.id} • {selectedPatientForHistory.phone}
+                  ID: {activeProfile?.regId || selectedPatientForHistory.regId || selectedPatientForHistory.id} • {selectedPatientForHistory.phone}
                 </Text>
               </View>
 
@@ -1122,7 +2117,7 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={styles.historyIconBtnWA}
-                      onPress={() => handleWhatsApp(selectedPatientForHistory.phone, selectedPatientForHistory.name)}
+                      onPress={() => handleWhatsApp(selectedPatientForHistory.phone, activeProfile?.name || selectedPatientForHistory.name)}
                     >
                       <MaterialCommunityIcons name="whatsapp" size={17} color="#16a34a" />
                     </TouchableOpacity>
@@ -1130,12 +2125,75 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
                 ) : null}
                 <TouchableOpacity
                   style={styles.historyCloseBtn}
-                  onPress={() => setSelectedPatientForHistory(null)}
+                  onPress={handleCloseHistoryModal}
                 >
                   <Feather name="x" size={20} color="#64748b" />
                 </TouchableOpacity>
               </View>
             </View>
+
+            {/* Family Profile Switcher Bar (when multiple profiles share this phone number) */}
+            {patientProfiles.length > 1 && (
+              <View style={styles.profileSelectorBar}>
+                <View style={styles.profileSelectorTopRow}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                    <MaterialCommunityIcons name="account-group" size={16} color="#0284c7" />
+                    <Text style={styles.profileSelectorTitle}>Family Members ({patientProfiles.length})</Text>
+                  </View>
+                  <Text style={styles.profileSelectorHint}>Select profile to isolate Rx & visits</Text>
+                </View>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.profileChipsScrollContent}
+                >
+                  {patientProfiles.map(p => {
+                    const isSelected = p.profileKey === (activeProfile?.profileKey || selectedProfileKey);
+                    return (
+                      <TouchableOpacity
+                        key={p.profileKey}
+                        style={[
+                          styles.profileTabChip,
+                          isSelected && styles.profileTabChipActive
+                        ]}
+                        onPress={() => setSelectedProfileKey(p.profileKey)}
+                        activeOpacity={0.75}
+                      >
+                        <MaterialCommunityIcons
+                          name={isSelected ? "account-check" : "account-outline"}
+                          size={15}
+                          color={isSelected ? "#ffffff" : "#475569"}
+                        />
+                        <Text
+                          style={[
+                            styles.profileTabChipText,
+                            isSelected && styles.profileTabChipTextActive
+                          ]}
+                          numberOfLines={1}
+                        >
+                          {p.name}
+                        </Text>
+                        <View
+                          style={[
+                            styles.profileCountBadge,
+                            isSelected && styles.profileCountBadgeActive
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.profileCountBadgeText,
+                              isSelected && styles.profileCountBadgeTextActive
+                            ]}
+                          >
+                            {p.visits.length}
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+            )}
 
             <ScrollView
               style={{ flex: 1 }}
@@ -1154,45 +2212,58 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
                   <View style={{ alignItems: 'flex-end' }}>
                     <View style={styles.visitsCountBadge}>
                       <Text style={styles.visitsCountText}>
-                        {historyVisits.length} {historyVisits.length === 1 ? 'Visit' : 'Visits'}
+                        {activeProfileVisits.length} {activeProfileVisits.length === 1 ? 'Visit' : 'Visits'}
                       </Text>
                     </View>
                     <Text style={styles.executiveBranchText}>
-                      {selectedPatientForHistory.branchName}
+                      {activeProfile?.branch || selectedPatientForHistory.branchName}
                     </Text>
                   </View>
                 </View>
 
-                {/* Edit Latest Prescription / Open Medical Consultation (Amount Locked) */}
-                <TouchableOpacity
-                  style={styles.openClinicalFileActionBtn}
-                  onPress={() => {
-                    const pat = selectedPatientForHistory;
-                    const latestVisit = historyVisits && historyVisits.length > 0 ? historyVisits[0] : undefined;
-                    setSelectedPatientForHistory(null);
-                    handleOpenPatientFile(pat, latestVisit);
-                  }}
-                  activeOpacity={0.85}
-                >
-                  <MaterialCommunityIcons name="file-document-edit-outline" size={19} color="#ffffff" />
-                  <View style={{ flex: 1, marginLeft: 8 }}>
-                    <Text style={styles.openClinicalFileActionText}>
-                      Edit Latest Prescription Only
-                    </Text>
-                    <Text style={styles.openClinicalFileActionSub}>
-                      {historyVisits[0] ? `Latest Visit: ${historyVisits[0].date} • Amount Locked` : 'Update prescription notes & remedies'}
-                    </Text>
-                  </View>
-                  <Feather name="arrow-right" size={16} color="#ffffff" />
-                </TouchableOpacity>
+                {/* Action Buttons Row: Edit Latest Rx & Upload Rx for Any Date */}
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+                  <TouchableOpacity
+                    style={[styles.openClinicalFileActionBtn, { flex: 1, marginTop: 0 }]}
+                    onPress={() => {
+                      const pat = selectedPatientForHistory;
+                      const latestVisit = activeProfileVisits && activeProfileVisits.length > 0 ? activeProfileVisits[0] : undefined;
+                      setSelectedPatientForHistory(null);
+                      handleOpenPatientFile(pat, latestVisit);
+                    }}
+                    activeOpacity={0.85}
+                  >
+                    <MaterialCommunityIcons name="file-document-edit-outline" size={17} color="#ffffff" />
+                    <View style={{ flex: 1, marginLeft: 6 }}>
+                      <Text style={styles.openClinicalFileActionText} numberOfLines={1}>
+                        Edit Latest Rx
+                      </Text>
+                      <Text style={styles.openClinicalFileActionSub} numberOfLines={1}>
+                        {activeProfileVisits[0] ? `Latest: ${activeProfileVisits[0].date}` : 'Notes & remedies'}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.uploadRxActionBtn}
+                    onPress={handleOpenUploadModal}
+                    activeOpacity={0.85}
+                  >
+                    <MaterialCommunityIcons name="cloud-upload" size={18} color="#ffffff" />
+                    <View style={{ marginLeft: 6 }}>
+                      <Text style={styles.uploadRxActionBtnText}>＋ Upload Rx</Text>
+                      <Text style={styles.uploadRxActionBtnSub}>Any Date Scan</Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
               </View>
 
               {/* Segmented Filter Bar: All | Prescriptions | Billing */}
               <View style={styles.historySegmentedBar}>
                 {[
                   { key: 'all', label: `All History (${historyVisits.length})` },
-                  { key: 'prescriptions', label: 'Prescriptions' },
-                  { key: 'billing', label: 'Payments & Billing' },
+                  { key: 'prescriptions', label: allVisitedPrescriptionImages.length > 0 ? `Prescriptions (${allVisitedPrescriptionImages.length} Imgs)` : 'Prescriptions' },
+                  { key: 'billing', label: totalPaidSum > 0 ? `Payments & Billing (₹${totalPaidSum.toLocaleString('en-IN')})` : 'Payments & Billing' },
                 ].map((tab) => (
                   <TouchableOpacity
                     key={tab.key}
@@ -1214,6 +2285,63 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
                 ))}
               </View>
 
+              {/* Sorting & Filter Control Toolbar (Last to First vs First to Last) */}
+              <View style={styles.historySortToolbar}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <MaterialCommunityIcons name="sort-variant" size={16} color="#0284c7" />
+                  <Text style={styles.historySortCountText}>
+                    {historyFilterTab === 'prescriptions'
+                      ? `${allVisitedPrescriptionImages.length} Prescription Images`
+                      : historyFilterTab === 'billing'
+                      ? `${filteredHistoryVisits.length} Payment Records`
+                      : `${sortedHistoryVisits.length} Recorded Visits`}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={styles.sortToggleBtn}
+                  onPress={() => setHistorySortOrder(prev => (prev === 'desc' ? 'asc' : 'desc'))}
+                  activeOpacity={0.75}
+                >
+                  <MaterialCommunityIcons
+                    name={historySortOrder === 'desc' ? 'sort-calendar-descending' : 'sort-calendar-ascending'}
+                    size={15}
+                    color="#0284c7"
+                  />
+                  <Text style={styles.sortToggleBtnText}>
+                    {historySortOrder === 'desc' ? 'Last to First (Newest)' : 'First to Last (Oldest)'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Top Banner: Executive Billing & Revenue Summary (Shown in Billing tab) */}
+              {historyFilterTab === 'billing' && (
+                <View style={styles.billingSummaryCard}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <View>
+                      <Text style={styles.billingSummaryLabel}>TOTAL COLLECTED PAYMENT</Text>
+                      <Text style={styles.billingSummaryAmount}>₹{totalPaidSum.toLocaleString('en-IN')}</Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={styles.billingSummaryLabel}>COLLECTED VISITS</Text>
+                      <Text style={styles.billingSummaryVisitsCount}>
+                        {historyVisits.filter(v => v.amountPaid > 0).length} of {historyVisits.length} Paid
+                      </Text>
+                    </View>
+                  </View>
+                  {historyVisits.length > 0 && (
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+                      {sortedHistoryVisits.map((v, idx) => (
+                        <View key={idx} style={styles.billingVisitPill}>
+                          <Text style={styles.billingVisitPillNum}>Visit #{v.visitNumber || (historyVisits.length - idx)}:</Text>
+                          <Text style={styles.billingVisitPillAmount}>₹{v.amountPaid.toLocaleString('en-IN')}</Text>
+                          <Text style={styles.billingVisitPillMode}>({v.paymentMode || 'Cash'})</Text>
+                        </View>
+                      ))}
+                    </ScrollView>
+                  )}
+                </View>
+              )}
+
               {/* Loading Indicator */}
               {isLoadingHistory ? (
                 <View style={{ paddingVertical: 30, alignItems: 'center' }}>
@@ -1224,273 +2352,774 @@ export const AllPatientsScreen: React.FC<AllPatientsScreenProps> = ({ onNavigate
                 </View>
               ) : null}
 
-              {/* List of Visits */}
-              {!isLoadingHistory && filteredHistoryVisits.length === 0 ? (
-                <View style={styles.emptyHistoryCard}>
-                  <MaterialCommunityIcons name="history" size={36} color="#94a3b8" />
-                  <Text style={styles.emptyHistoryTitle}>No records in this category</Text>
-                  <Text style={styles.emptyHistorySub}>
-                    Try switching back to "All History" to see appointments.
-                  </Text>
-                </View>
-              ) : (
-                filteredHistoryVisits.map((visit, vIdx) => {
-                  const isPaid = visit.amountPaid > 0 || visit.paymentStatus === 'paid' || visit.status === 'completed';
-                  const isUpi = (visit.paymentMode || '').toLowerCase().includes('upi');
-                  const isCash = (visit.paymentMode || '').toLowerCase().includes('cash');
-                  const isCard = (visit.paymentMode || '').toLowerCase().includes('card');
-                  const isSplit = (visit.paymentMode || '').toLowerCase().includes('split');
-
-                  return (
-                    <View key={visit.id || vIdx} style={styles.visitCard}>
-                      {/* Visit Header */}
-                      <View style={styles.visitCardHeader}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                          <View style={styles.visitIndexBadge}>
-                            <Text style={styles.visitIndexText}>VISIT #{historyVisits.length - vIdx}</Text>
-                          </View>
-                          <Text style={styles.visitDateText}>{visit.date}</Text>
-                          <Text style={styles.visitTimeText}>• {visit.time}</Text>
-                        </View>
-                        <View style={[styles.visitStatusBadge, isPaid ? styles.statusPaidBg : styles.statusPendingBg]}>
-                          <Text style={[styles.visitStatusBadgeText, isPaid ? styles.statusPaidText : styles.statusPendingText]}>
-                            {isPaid ? 'Completed ✓' : 'Pay Pending'}
-                          </Text>
-                        </View>
+              {/* View Mode A: PRESCRIPTIONS TAB -> 2x2 GRID VIEW */}
+              {!isLoadingHistory && historyFilterTab === 'prescriptions' && (
+                <View>
+                  {/* Quick Banner to Upload Prescription for Any Date */}
+                  <TouchableOpacity
+                    style={styles.uploadRxBannerBtn}
+                    onPress={handleOpenUploadModal}
+                    activeOpacity={0.85}
+                  >
+                    <View style={styles.uploadRxBannerLeft}>
+                      <View style={styles.uploadRxBannerIconBox}>
+                        <MaterialCommunityIcons name="camera-plus" size={20} color="#0284c7" />
                       </View>
-
-                      {/* Doctor & Branch Row */}
-                      <View style={styles.visitMetaRow}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 }}>
-                          <MaterialCommunityIcons name="stethoscope" size={14} color="#0284c7" />
-                          <Text style={styles.visitDoctorText} numberOfLines={1}>
-                            {visit.doctor || 'Homeopathic Doctor'}
-                          </Text>
-                        </View>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                          <Feather name="map-pin" size={12} color="#64748b" />
-                          <Text style={styles.visitBranchText}>{visit.branch}</Text>
-                        </View>
+                      <View style={{ flex: 1, marginLeft: 10 }}>
+                        <Text style={styles.uploadRxBannerTitle}>
+                          Upload Prescription Scan
+                        </Text>
+                        <Text style={styles.uploadRxBannerSub}>
+                          Camera photo or gallery image for any date
+                        </Text>
                       </View>
+                    </View>
+                    <View style={styles.uploadRxBannerPill}>
+                      <Text style={styles.uploadRxBannerPillText}>＋ Add Rx</Text>
+                    </View>
+                  </TouchableOpacity>
 
-                      {/* 1. Paid Amount & Payment Method Section */}
-                      <View style={styles.visitPaymentBox}>
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <View>
-                            <Text style={styles.paymentBoxLabel}>AMOUNT PAID</Text>
-                            <Text style={styles.paymentBoxAmount}>
-                              ₹{visit.amountPaid.toLocaleString('en-IN')}
-                            </Text>
-                          </View>
-
-                          <View style={{ alignItems: 'flex-end' }}>
-                            <Text style={styles.paymentBoxLabel}>PAYMENT METHOD</Text>
-                            <View
-                              style={[
-                                styles.paymentMethodBadge,
-                                isUpi ? styles.pillUpi : isCash ? styles.pillCash : isCard ? styles.pillCard : isSplit ? styles.pillSplit : styles.pillDefault
-                              ]}
-                            >
-                              <Text style={{ fontSize: 11 }}>
-                                {isUpi ? '📱' : isCash ? '💵' : isCard ? '💳' : isSplit ? '🔀' : '💰'}
-                              </Text>
-                              <Text
-                                style={[
-                                  styles.paymentMethodBadgeText,
-                                  isUpi ? styles.textUpi : isCash ? styles.textCash : isCard ? styles.textCard : isSplit ? styles.textSplit : styles.textDefault
-                                ]}
-                              >
-                                {visit.paymentMode || 'Cash'}
+                  {allVisitedPrescriptionImages.length === 0 ? (
+                    <View style={styles.emptyHistoryCard}>
+                      <MaterialCommunityIcons name="image-off-outline" size={40} color="#94a3b8" />
+                      <Text style={styles.emptyHistoryTitle}>No Prescription Images Found</Text>
+                      <Text style={styles.emptyHistorySub}>
+                        No scanned prescription images were uploaded for {activeProfile?.name || 'this patient'}. Tap "＋ Add Rx" above to upload a prescription!
+                      </Text>
+                    </View>
+                  ) : (
+                    <View style={styles.prescriptionGrid2x2}>
+                      {allVisitedPrescriptionImages.map((img, idx) => (
+                        <View key={idx} style={styles.prescriptionGridItem}>
+                          {/* Box Header: Prescription Number & Date */}
+                          <View style={styles.prescriptionGridHeader}>
+                            <View style={styles.prescriptionProperBadge}>
+                              <MaterialCommunityIcons name="file-document-outline" size={11} color="#0284c7" />
+                              <Text style={styles.prescriptionProperBadgeText}>
+                                Img {img.imageIndex}
                               </Text>
                             </View>
-                          </View>
-                        </View>
-
-                        {/* Split Details if applicable */}
-                        {visit.splitDetails ? (
-                          <View style={styles.splitDetailsRow}>
-                            <Text style={styles.splitDetailsText}>
-                              Split: {visit.splitDetails}
+                            <TouchableOpacity
+                              style={styles.prescriptionGridDeleteBtn}
+                              onPress={() => {
+                                setImageToDelete({
+                                  uri: img.uri,
+                                  visitNumber: img.visitNumber,
+                                  visitDate: img.visitDate,
+                                  imageIndex: img.imageIndex,
+                                  visitId: img.visitId,
+                                });
+                              }}
+                              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                              activeOpacity={0.7}
+                            >
+                              <Feather name="trash-2" size={12} color="#dc2626" />
+                            </TouchableOpacity>
+                            <Text style={styles.prescriptionGridDateText} numberOfLines={1}>
+                              {img.visitDate ? String(img.visitDate).slice(-5) : ''}
                             </Text>
                           </View>
-                        ) : null}
 
-                        {/* Fee Breakdown if available */}
-                        {(visit.consultationFee || visit.medicineFee || visit.discount) ? (
-                          <View style={styles.feeBreakdownRow}>
-                            {visit.consultationFee ? (
-                              <Text style={styles.feeBreakdownItem}>
-                                Consult: ₹{visit.consultationFee}
-                              </Text>
-                            ) : null}
-                            {visit.medicineFee ? (
-                              <Text style={styles.feeBreakdownItem}>
-                                Medicines: ₹{visit.medicineFee}
-                              </Text>
-                            ) : null}
-                            {visit.discount ? (
-                              <Text style={[styles.feeBreakdownItem, { color: '#059669' }]}>
-                                Disc: -₹{visit.discount}
-                              </Text>
-                            ) : null}
-                          </View>
-                        ) : null}
-
-                        {/* Payment ID / Ref */}
-                        {visit.paymentId ? (
-                          <Text style={styles.paymentRefText}>Ref ID: {visit.paymentId}</Text>
-                        ) : null}
-                      </View>
-
-                      {/* 2. Updated Prescriptions & Remedies Section */}
-                      <View style={styles.visitPrescriptionBox}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
-                            <MaterialCommunityIcons name="pill" size={16} color="#0284c7" />
-                            <Text style={styles.prescriptionBoxTitle} numberOfLines={1}>Updated Prescriptions & Remedies</Text>
-                          </View>
+                          {/* Framed Image Container with 2x2 dimensions */}
                           <TouchableOpacity
-                            style={styles.editVisitRxBtn}
-                            onPress={() => {
-                              const pat = selectedPatientForHistory;
-                              setSelectedPatientForHistory(null);
-                              handleOpenPatientFile(pat, visit);
-                            }}
-                            activeOpacity={0.8}
+                            style={styles.prescriptionGridImageFrame}
+                            onPress={() => openLightbox(allVisitedPrescriptionImages.map(i => i.uri), idx)}
+                            activeOpacity={0.85}
                           >
-                            <MaterialCommunityIcons name="pencil-outline" size={13} color="#0284c7" />
-                            <Text style={styles.editVisitRxBtnText}>Edit Rx</Text>
+                            <Image
+                              source={{ uri: img.uri }}
+                              style={styles.prescriptionProperImage}
+                              resizeMode="contain"
+                            />
+                            <View style={styles.prescriptionGridZoomBadge}>
+                              <Feather name="maximize-2" size={11} color="#ffffff" />
+                            </View>
                           </TouchableOpacity>
                         </View>
+                      ))}
+                    </View>
+                  )}
+                </View>
+              )}
 
-                        {/* Chief Complaints / Diagnosis */}
-                        {(visit.chiefComplaint || visit.diagnosisNotes) ? (
-                          <View style={styles.diagnosisBox}>
-                            {visit.chiefComplaint ? (
-                              <Text style={styles.diagnosisText}>
-                                <Text style={{ fontWeight: '800', color: '#334155' }}>Complaints: </Text>
-                                {visit.chiefComplaint}
+              {/* View Mode B: ALL HISTORY & BILLING TABS */}
+              {!isLoadingHistory && historyFilterTab !== 'prescriptions' && (
+                filteredHistoryVisits.length === 0 ? (
+                  <View style={styles.emptyHistoryCard}>
+                    <MaterialCommunityIcons name="history" size={36} color="#94a3b8" />
+                    <Text style={styles.emptyHistoryTitle}>No records in this category</Text>
+                    <Text style={styles.emptyHistorySub}>
+                      Try switching back to "All History" to see appointments.
+                    </Text>
+                  </View>
+                ) : (
+                  filteredHistoryVisits.map((visit, vIdx) => {
+                    const visitNum = visit.visitNumber || (historyVisits.length - vIdx);
+                    const isPaid = visit.amountPaid > 0 || visit.paymentStatus === 'paid' || visit.status === 'completed';
+                    const isUpi = (visit.paymentMode || '').toLowerCase().includes('upi');
+                    const isCash = (visit.paymentMode || '').toLowerCase().includes('cash');
+                    const isCard = (visit.paymentMode || '').toLowerCase().includes('card');
+                    const isSplit = (visit.paymentMode || '').toLowerCase().includes('split');
+
+                    const showPayment = historyFilterTab === 'all' || historyFilterTab === 'billing';
+                    const showPrescription = historyFilterTab === 'all';
+
+                    return (
+                      <View key={visit.id || vIdx} style={styles.visitCard}>
+                        {/* Visit Header */}
+                        <View style={styles.visitCardHeader}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                            <View style={styles.visitIndexBadge}>
+                              <Text style={styles.visitIndexText}>
+                                VISIT #{visitNum} {historyFilterTab === 'billing' ? '• PAYMENT' : ''}
                               </Text>
+                            </View>
+                            <Text style={styles.visitDateText}>{formatPrettyDate(visit.date)}</Text>
+                            <Text style={styles.visitTimeText}>• {visit.time}</Text>
+                          </View>
+                          <View style={[styles.visitStatusBadge, isPaid ? styles.statusPaidBg : styles.statusPendingBg]}>
+                            <Text style={[styles.visitStatusBadgeText, isPaid ? styles.statusPaidText : styles.statusPendingText]}>
+                              {isPaid ? 'Completed ✓' : 'Pay Pending'}
+                            </Text>
+                          </View>
+                        </View>
+
+                        {/* Doctor & Branch Row */}
+                        <View style={styles.visitMetaRow}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 }}>
+                            <MaterialCommunityIcons name="stethoscope" size={14} color="#0284c7" />
+                            <Text style={styles.visitDoctorText} numberOfLines={1}>
+                              {visit.doctor || 'Homeopathic Doctor'}
+                            </Text>
+                          </View>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                            <Feather name="map-pin" size={12} color="#64748b" />
+                            <Text style={styles.visitBranchText}>{visit.branch}</Text>
+                          </View>
+                        </View>
+
+                        {/* 1. Paid Amount & Payment Method Section (Shown under All or Billing) */}
+                        {showPayment && (
+                          <View style={styles.visitPaymentBox}>
+                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <View>
+                                <Text style={styles.paymentBoxLabel}>
+                                  {historyFilterTab === 'billing' ? `VISIT #${visitNum} AMOUNT PAID` : 'AMOUNT PAID'}
+                                </Text>
+                                <Text style={styles.paymentBoxAmount}>
+                                  ₹{visit.amountPaid.toLocaleString('en-IN')}
+                                </Text>
+                              </View>
+
+                              <View style={{ alignItems: 'flex-end' }}>
+                                <Text style={styles.paymentBoxLabel}>PAYMENT METHOD</Text>
+                                <View
+                                  style={[
+                                    styles.paymentMethodBadge,
+                                    isUpi ? styles.pillUpi : isCash ? styles.pillCash : isCard ? styles.pillCard : isSplit ? styles.pillSplit : styles.pillDefault
+                                  ]}
+                                >
+                                  <Text style={{ fontSize: 11 }}>
+                                    {isUpi ? '📱' : isCash ? '💵' : isCard ? '💳' : isSplit ? '🔀' : '💰'}
+                                  </Text>
+                                  <Text
+                                    style={[
+                                      styles.paymentMethodBadgeText,
+                                      isUpi ? styles.textUpi : isCash ? styles.textCash : isCard ? styles.textCard : isSplit ? styles.textSplit : styles.textDefault
+                                    ]}
+                                  >
+                                    {visit.paymentMode || 'Cash'}
+                                  </Text>
+                                </View>
+                              </View>
+                            </View>
+
+                            {/* Split Details if applicable */}
+                            {visit.splitDetails ? (
+                              <View style={styles.splitDetailsRow}>
+                                <Text style={styles.splitDetailsText}>
+                                  Split Details: {visit.splitDetails}
+                                </Text>
+                              </View>
                             ) : null}
-                            {visit.diagnosisNotes ? (
-                              <Text style={styles.diagnosisText}>
-                                <Text style={{ fontWeight: '800', color: '#334155' }}>Diagnosis: </Text>
-                                {visit.diagnosisNotes}
-                              </Text>
+
+                            {/* Detailed Dates Row: Payment Date & Appointment Date */}
+                            <View style={styles.paymentDatesBox}>
+                              <View style={styles.paymentDateItem}>
+                                <Text style={styles.paymentDateLabel}>💳 Payment Date:</Text>
+                                <Text style={[styles.paymentDateVal, (!isPaid && !visit.paymentDate) && { color: '#d97706' }]}>
+                                  {visit.paymentDate ? (
+                                    `${formatPrettyDate(visit.paymentDate)} ${visit.paymentTime ? `• ${visit.paymentTime}` : ''}`
+                                  ) : isPaid ? (
+                                    `${formatPrettyDate(visit.date)} ${visit.paymentTime ? `• ${visit.paymentTime}` : ''}`
+                                  ) : (
+                                    'Pending / Unpaid'
+                                  )}
+                                </Text>
+                              </View>
+                              <View style={styles.paymentDateItem}>
+                                <Text style={styles.paymentDateLabel}>📅 Appt Date:</Text>
+                                <Text style={styles.paymentDateVal}>
+                                  {formatPrettyDate(visit.date)} • {visit.time}
+                                </Text>
+                              </View>
+                            </View>
+
+                            {/* Fee Breakdown if available */}
+                            {(visit.consultationFee || visit.medicineFee || visit.discount) ? (
+                              <View style={styles.feeBreakdownRow}>
+                                {visit.consultationFee ? (
+                                  <Text style={styles.feeBreakdownItem}>
+                                    Consult: ₹{visit.consultationFee}
+                                  </Text>
+                                ) : null}
+                                {visit.medicineFee ? (
+                                  <Text style={styles.feeBreakdownItem}>
+                                    Medicines: ₹{visit.medicineFee}
+                                  </Text>
+                                ) : null}
+                                {visit.discount ? (
+                                  <Text style={[styles.feeBreakdownItem, { color: '#059669' }]}>
+                                    Disc: -₹{visit.discount}
+                                  </Text>
+                                ) : null}
+                                <Text style={[styles.feeBreakdownItem, { fontWeight: '800', color: '#0f172a' }]}>
+                                  Net: ₹{(visit.totalAmount || visit.amountPaid).toLocaleString('en-IN')}
+                                </Text>
+                              </View>
+                            ) : null}
+
+                            {/* Payment ID / Ref */}
+                            {visit.paymentId ? (
+                              <Text style={styles.paymentRefText}>Ref ID: {visit.paymentId}</Text>
                             ) : null}
                           </View>
-                        ) : null}
+                        )}
 
-                        {/* Remedies List */}
-                        {visit.medicines && visit.medicines.length > 0 ? (
-                          <View style={{ gap: 6 }}>
-                            {visit.medicines.map((med, mIdx) => (
-                              <View key={mIdx} style={styles.remedyItemCard}>
-                                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                                  <Text style={styles.remedyNameText}>
-                                    {mIdx + 1}. {med.name}
+                        {/* 2. Updated Prescriptions & Remedies Section (Shown under All History tab only) */}
+                        {showPrescription && (
+                          <View style={styles.visitPrescriptionBox}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
+                                <MaterialCommunityIcons name="pill" size={16} color="#0284c7" />
+                                <Text style={styles.prescriptionBoxTitle} numberOfLines={1}>
+                                  Updated Prescriptions & Remedies
+                                </Text>
+                              </View>
+                              <TouchableOpacity
+                                style={styles.editVisitRxBtn}
+                                onPress={() => {
+                                  const pat = selectedPatientForHistory;
+                                  setSelectedPatientForHistory(null);
+                                  handleOpenPatientFile(pat, visit);
+                                }}
+                                activeOpacity={0.8}
+                              >
+                                <MaterialCommunityIcons name="pencil-outline" size={13} color="#0284c7" />
+                                <Text style={styles.editVisitRxBtnText}>Edit Rx</Text>
+                              </TouchableOpacity>
+                            </View>
+
+                            {/* Chief Complaints / Diagnosis */}
+                            {(visit.chiefComplaint || visit.diagnosisNotes) ? (
+                              <View style={styles.diagnosisBox}>
+                                {visit.chiefComplaint ? (
+                                  <Text style={styles.diagnosisText}>
+                                    <Text style={{ fontWeight: '800', color: '#334155' }}>Complaints: </Text>
+                                    {visit.chiefComplaint}
                                   </Text>
-                                  {med.potency ? (
-                                    <View style={styles.remedyPotencyBadge}>
-                                      <Text style={styles.remedyPotencyText}>{med.potency}</Text>
-                                    </View>
-                                  ) : null}
-                                </View>
-                                <View style={{ flexDirection: 'row', gap: 10, marginTop: 4, flexWrap: 'wrap' }}>
-                                  {med.dosage ? (
-                                    <Text style={styles.remedyMetaText}>Dosage: {med.dosage}</Text>
-                                  ) : null}
-                                  {med.frequency ? (
-                                    <Text style={styles.remedyMetaText}>Freq: {med.frequency}</Text>
-                                  ) : null}
-                                  {med.duration ? (
-                                    <Text style={styles.remedyMetaText}>Duration: {med.duration}</Text>
-                                  ) : null}
-                                </View>
-                                {med.instructions ? (
-                                  <Text style={styles.remedyInstructionsText}>
-                                    Instructions: {med.instructions}
+                                ) : null}
+                                {visit.diagnosisNotes ? (
+                                  <Text style={styles.diagnosisText}>
+                                    <Text style={{ fontWeight: '800', color: '#334155' }}>Diagnosis: </Text>
+                                    {visit.diagnosisNotes}
                                   </Text>
                                 ) : null}
                               </View>
-                            ))}
-                          </View>
-                        ) : (
-                          <Text style={styles.noMedsText}>
-                            Remedies recorded in clinical file
-                          </Text>
-                        )}
+                            ) : null}
 
-                        {/* Attached Prescription Scans & Canvas Drawings */}
-                        {visit.prescriptionImages && visit.prescriptionImages.length > 0 ? (
-                          <View style={{ marginTop: 10 }}>
-                            <Text style={styles.attachedImagesTitle}>
-                              Attached Prescriptions & Drawings (Tap to view full screen):
-                            </Text>
-                            <ScrollView
-                              horizontal
-                              showsHorizontalScrollIndicator={false}
-                              contentContainerStyle={{ gap: 8, paddingVertical: 4 }}
-                            >
-                              {visit.prescriptionImages.map((imgUrl, iIdx) => (
-                                <TouchableOpacity
-                                  key={iIdx}
-                                  style={styles.prescriptionThumbnailWrapper}
-                                  onPress={() => setImagePreviewUrl(imgUrl)}
-                                  activeOpacity={0.8}
-                                >
-                                  <Image
-                                    source={{ uri: imgUrl }}
-                                    style={styles.prescriptionThumbnail}
-                                    resizeMode="cover"
-                                  />
-                                  <View style={styles.thumbnailZoomHint}>
-                                    <Feather name="zoom-in" size={13} color="#ffffff" />
+                            {/* Remedies List */}
+                            {visit.medicines && visit.medicines.length > 0 ? (
+                              <View style={{ gap: 6 }}>
+                                {visit.medicines.map((med, mIdx) => (
+                                  <View key={mIdx} style={styles.remedyItemCard}>
+                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                                      <Text style={styles.remedyNameText}>
+                                        {mIdx + 1}. {med.name}
+                                      </Text>
+                                      {med.potency ? (
+                                        <View style={styles.remedyPotencyBadge}>
+                                          <Text style={styles.remedyPotencyText}>{med.potency}</Text>
+                                        </View>
+                                      ) : null}
+                                    </View>
+                                    <View style={{ flexDirection: 'row', gap: 10, marginTop: 4, flexWrap: 'wrap' }}>
+                                      {med.dosage ? (
+                                        <Text style={styles.remedyMetaText}>Dosage: {med.dosage}</Text>
+                                      ) : null}
+                                      {med.frequency ? (
+                                        <Text style={styles.remedyMetaText}>Freq: {med.frequency}</Text>
+                                      ) : null}
+                                      {med.duration ? (
+                                        <Text style={styles.remedyMetaText}>Duration: {med.duration}</Text>
+                                      ) : null}
+                                    </View>
+                                    {med.instructions ? (
+                                      <Text style={styles.remedyInstructionsText}>
+                                        Instructions: {med.instructions}
+                                      </Text>
+                                    ) : null}
                                   </View>
-                                </TouchableOpacity>
-                              ))}
-                            </ScrollView>
-                          </View>
-                        ) : null}
+                                ))}
+                              </View>
+                            ) : (
+                              <Text style={styles.noMedsText}>
+                                Remedies recorded in clinical file
+                              </Text>
+                            )}
 
-                        {/* Doctor Notes */}
-                        {visit.doctorNotes ? (
-                          <View style={styles.doctorNotesBox}>
-                            <Text style={styles.doctorNotesLabel}>Doctor Advice & Lifestyle Guidance:</Text>
-                            <Text style={styles.doctorNotesText}>{visit.doctorNotes}</Text>
+                            {/* Attached Prescription Scans & Canvas Drawings */}
+                            {visit.prescriptionImages && visit.prescriptionImages.length > 0 ? (
+                              <View style={{ marginTop: 10 }}>
+                                <Text style={styles.attachedImagesTitle}>
+                                  Attached Prescription Images ({visit.prescriptionImages.length}) • Tap to zoom:
+                                </Text>
+                                <ScrollView
+                                  horizontal
+                                  showsHorizontalScrollIndicator={false}
+                                  contentContainerStyle={{ gap: 10, paddingVertical: 4 }}
+                                >
+                                  {visit.prescriptionImages.map((imgUrl, iIdx) => (
+                                    <View key={iIdx} style={styles.prescriptionImgCardWrapper}><TouchableOpacity
+
+                                      style={styles.prescriptionImgCard}
+                                      onPress={() => openLightbox(visit.prescriptionImages, iIdx)}
+                                      activeOpacity={0.8}
+                                    >
+                                      <Image
+                                        source={{ uri: imgUrl }}
+                                        style={styles.prescriptionThumbnail}
+                                        resizeMode="cover"
+                                      />
+                                      <View style={styles.prescriptionImgBadge}>
+                                        <Text style={styles.prescriptionImgBadgeText}>Image {iIdx + 1}</Text>
+                                      </View>
+                                      <View style={styles.thumbnailZoomHint}>
+                                        <Feather name="zoom-in" size={13} color="#ffffff" />
+                                      </View>
+                                    </TouchableOpacity>
+                                    <TouchableOpacity
+                                      style={styles.thumbnailDeleteBtn}
+                                      onPress={() => {
+                                        setImageToDelete({
+                                          uri: imgUrl,
+                                          visitNumber: visit.visitNumber,
+                                          visitDate: visit.date,
+                                          imageIndex: iIdx + 1,
+                                          visitId: visit.id,
+                                        });
+                                      }}
+                                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                                      activeOpacity={0.75}
+                                    >
+                                      <Feather name="trash-2" size={11} color="#ffffff" />
+                                    </TouchableOpacity>
+                                  </View>
+                                  ))}
+                                </ScrollView>
+                              </View>
+                            ) : null}
+
+                            {/* Doctor Notes */}
+                            {visit.doctorNotes ? (
+                              <View style={styles.doctorNotesBox}>
+                                <Text style={styles.doctorNotesLabel}>Doctor Advice & Lifestyle Guidance:</Text>
+                                <Text style={styles.doctorNotesText}>{visit.doctorNotes}</Text>
+                              </View>
+                            ) : null}
                           </View>
-                        ) : null}
+                        )}
                       </View>
-                    </View>
-                  );
-                })
+                    );
+                  })
+                )
               )}
             </ScrollView>
           </SafeAreaView>
         )}
       </Modal>
 
-      {/* Full-Screen Image Lightbox Modal */}
+      {/* Full-Screen Image Lightbox Modal with Rotate & Swipe */}
+      {!!imagePreviewUrl && (
+        <Modal
+          visible={!!imagePreviewUrl}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={closeLightbox}
+        >
+          <View style={styles.imageLightboxOverlay}>
+            <StatusBar backgroundColor="#000000" barStyle="light-content" />
+
+            {/* Top Controls Toolbar */}
+            <SafeAreaView style={styles.lightboxTopToolbar}>
+              <View style={styles.lightboxCounterBadge}>
+                <Text style={styles.lightboxCounterText}>
+                  {lightboxImages.length > 0 ? `${lightboxIndex + 1} / ${lightboxImages.length}` : '1 / 1'}
+                </Text>
+              </View>
+
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                {/* Remove / Delete Button */}
+                <TouchableOpacity
+                  style={styles.lightboxDeleteBtn}
+                  onPress={() => {
+                    if (imagePreviewUrl) {
+                      setImageToDelete({
+                        uri: imagePreviewUrl,
+                        imageIndex: lightboxIndex + 1,
+                      });
+                    }
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Feather name="trash-2" size={16} color="#ffffff" />
+                  <Text style={styles.lightboxDeleteBtnText}>Remove</Text>
+                </TouchableOpacity>
+
+                {/* Rotate Button (90 deg per tap) */}
+                <TouchableOpacity
+                  style={styles.lightboxToolbarBtn}
+                  onPress={handleRotateImage}
+                  activeOpacity={0.7}
+                >
+                  <MaterialCommunityIcons name="rotate-right" size={20} color="#ffffff" />
+                  <Text style={styles.lightboxToolbarBtnText}>{imageRotation}°</Text>
+                </TouchableOpacity>
+
+                {/* Close Button */}
+                <TouchableOpacity
+                  style={styles.lightboxCloseBtn}
+                  onPress={closeLightbox}
+                  activeOpacity={0.7}
+                >
+                  <Feather name="x" size={22} color="#ffffff" />
+                </TouchableOpacity>
+              </View>
+            </SafeAreaView>
+
+            {/* Main Image Area with Horizontal Swipe PanResponder */}
+            <View style={styles.lightboxImageArea} {...panResponder.panHandlers}>
+              <Image
+                source={{ uri: imagePreviewUrl }}
+                style={[
+                  styles.imageLightboxImage,
+                  { transform: [{ rotate: `${imageRotation}deg` }] }
+                ]}
+                resizeMode="contain"
+              />
+            </View>
+
+            {/* Left (<) Navigation Arrow Button */}
+            {lightboxImages.length > 1 && (
+              <TouchableOpacity
+                style={[styles.lightboxNavBtn, styles.lightboxNavBtnLeft]}
+                onPress={handlePrevImage}
+                activeOpacity={0.75}
+              >
+                <Feather name="chevron-left" size={32} color="#ffffff" />
+              </TouchableOpacity>
+            )}
+
+            {/* Right (>) Navigation Arrow Button */}
+            {lightboxImages.length > 1 && (
+              <TouchableOpacity
+                style={[styles.lightboxNavBtn, styles.lightboxNavBtnRight]}
+                onPress={handleNextImage}
+                activeOpacity={0.75}
+              >
+                <Feather name="chevron-right" size={32} color="#ffffff" />
+              </TouchableOpacity>
+            )}
+
+            {/* Bottom Swipe Guidance Hint */}
+            {lightboxImages.length > 1 && (
+              <View style={styles.lightboxBottomHint}>
+                <Text style={styles.lightboxBottomHintText}>
+                  Swipe left / right or tap &lt; &gt; arrows to view next prescription
+                </Text>
+              </View>
+            )}
+          </View>
+        </Modal>
+      )}
+
+      {/* Confirmation Modal to Remove Prescription Image */}
+      {!!imageToDelete && (
+        <Modal
+          visible={!!imageToDelete}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => {
+            if (!isDeletingImage) setImageToDelete(null);
+          }}
+        >
+          <View style={styles.confirmModalOverlay}>
+            <View style={styles.confirmModalCard}>
+              {/* Header with Icon and Title */}
+              <View style={styles.confirmModalHeader}>
+                <View style={styles.confirmTrashIconBox}>
+                  <Feather name="trash-2" size={22} color="#dc2626" />
+                </View>
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={styles.confirmModalTitle}>Remove Prescription Image</Text>
+                  <Text style={styles.confirmModalSub}>
+                    Are you sure you want to remove this image?
+                  </Text>
+                </View>
+              </View>
+
+              {/* Preview Thumbnail of Selected Image */}
+              {imageToDelete?.uri ? (
+                <View style={styles.confirmImagePreviewBox}>
+                  <Image
+                    source={{ uri: imageToDelete.uri }}
+                    style={styles.confirmImagePreview}
+                    resizeMode="contain"
+                  />
+                  <View style={styles.confirmImageMeta}>
+                    <Text style={styles.confirmImageMetaText} numberOfLines={1}>
+                      👤 Patient: <Text style={{ fontWeight: '800', color: '#0f172a' }}>{activeProfile?.name || selectedPatientForHistory?.name}</Text>
+                    </Text>
+                    {imageToDelete.visitDate ? (
+                      <Text style={styles.confirmImageMetaText}>
+                        📅 Date: <Text style={{ fontWeight: '700', color: '#0f172a' }}>{formatPrettyDate(imageToDelete.visitDate)}</Text>
+                        {imageToDelete.visitNumber ? ` (Visit #${imageToDelete.visitNumber})` : ''}
+                      </Text>
+                    ) : null}
+                  </View>
+                </View>
+              ) : null}
+
+              <Text style={styles.confirmWarningText}>
+                ⚠️ This image will be permanently removed from this patient's records.
+              </Text>
+
+              {/* Action Buttons: Cancel and OK, Remove */}
+              <View style={styles.confirmButtonsRow}>
+                <TouchableOpacity
+                  style={styles.confirmCancelBtn}
+                  onPress={() => setImageToDelete(null)}
+                  disabled={isDeletingImage}
+                  activeOpacity={0.75}
+                >
+                  <Text style={styles.confirmCancelBtnText}>Cancel</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.confirmDeleteBtn, isDeletingImage && styles.confirmDeleteBtnDisabled]}
+                  onPress={handleConfirmDeleteImage}
+                  disabled={isDeletingImage}
+                  activeOpacity={0.85}
+                >
+                  {isDeletingImage ? (
+                    <ActivityIndicator size="small" color="#ffffff" />
+                  ) : (
+                    <>
+                      <Feather name="trash-2" size={15} color="#ffffff" />
+                      <Text style={styles.confirmDeleteBtnText}>OK, Remove</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      )}
+
+      {/* Upload Prescription Scan Modal (Camera / Gallery for Any Date) */}
       <Modal
-        visible={!!imagePreviewUrl}
+        visible={uploadModalVisible}
         transparent={true}
         animationType="fade"
-        onRequestClose={() => setImagePreviewUrl(null)}
+        onRequestClose={() => {
+          if (!isUploadingPrescription) setUploadModalVisible(false);
+        }}
       >
-        <View style={styles.imageLightboxOverlay}>
-          <TouchableOpacity
-            style={styles.imageLightboxCloseBtn}
-            onPress={() => setImagePreviewUrl(null)}
-          >
-            <Feather name="x" size={24} color="#ffffff" />
-          </TouchableOpacity>
-          {imagePreviewUrl ? (
-            <Image
-              source={{ uri: imagePreviewUrl }}
-              style={styles.imageLightboxImage}
-              resizeMode="contain"
-            />
-          ) : null}
+        <View style={styles.uploadModalOverlay}>
+          <View style={styles.uploadModalCard}>
+            {/* Header */}
+            <View style={styles.uploadModalHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.uploadModalTitle}>Upload Prescription</Text>
+                <Text style={styles.uploadModalSub} numberOfLines={1}>
+                  {activeProfile?.name || selectedPatientForHistory?.name} • {selectedPatientForHistory?.phone}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.uploadModalCloseBtn}
+                onPress={() => setUploadModalVisible(false)}
+                disabled={isUploadingPrescription}
+              >
+                <Feather name="x" size={20} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ padding: 16 }}>
+              {/* Profile Selector (if multiple family members exist) */}
+              {patientProfiles.length > 1 && (
+                <View style={{ marginBottom: 16 }}>
+                  <Text style={styles.uploadFieldLabel}>ASSIGN TO PATIENT PROFILE:</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, marginTop: 6 }}>
+                    {patientProfiles.map(p => {
+                      const isSel = (uploadTargetProfileKey || activeProfile?.profileKey) === p.profileKey;
+                      return (
+                        <TouchableOpacity
+                          key={p.profileKey}
+                          style={[styles.uploadProfilePill, isSel && styles.uploadProfilePillActive]}
+                          onPress={() => setUploadTargetProfileKey(p.profileKey)}
+                          activeOpacity={0.75}
+                        >
+                          <MaterialCommunityIcons
+                            name={isSel ? "account-check" : "account-outline"}
+                            size={14}
+                            color={isSel ? "#ffffff" : "#475569"}
+                          />
+                          <Text style={[styles.uploadProfilePillText, isSel && styles.uploadProfilePillTextActive]}>
+                            {p.name}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
+              )}
+
+              {/* Target Date Input with Quick Date Chips */}
+              <View style={{ marginBottom: 16 }}>
+                <Text style={styles.uploadFieldLabel}>PRESCRIPTION / VISIT DATE (YYYY-MM-DD):</Text>
+                <View style={styles.uploadDateInputBox}>
+                  <Feather name="calendar" size={17} color="#0284c7" />
+                  <TextInput
+                    style={styles.uploadDateInput}
+                    value={uploadTargetDate}
+                    onChangeText={setUploadTargetDate}
+                    placeholder="YYYY-MM-DD"
+                    placeholderTextColor="#94a3b8"
+                  />
+                  {uploadTargetDate ? (
+                    <TouchableOpacity onPress={() => setUploadTargetDate(new Date().toISOString().split('T')[0])}>
+                      <Text style={{ fontSize: 11, color: '#0284c7', fontWeight: '700' }}>Today</Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+
+                {/* Quick Date Chips */}
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, marginTop: 8 }}>
+                  {[
+                    { label: 'Today', date: new Date().toISOString().split('T')[0] },
+                    { label: 'Yesterday', date: new Date(Date.now() - 86400000).toISOString().split('T')[0] },
+                    ...activeProfileVisits.slice(0, 3).map(v => ({ label: v.date, date: v.date }))
+                  ].filter((item, idx, arr) => arr.findIndex(x => x.date === item.date) === idx)
+                   .map(item => {
+                    const isSel = uploadTargetDate === item.date;
+                    return (
+                      <TouchableOpacity
+                        key={item.date}
+                        style={[styles.quickDateChip, isSel && styles.quickDateChipActive]}
+                        onPress={() => setUploadTargetDate(item.date)}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={[styles.quickDateChipText, isSel && styles.quickDateChipTextActive]}>
+                          {item.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+
+              {/* Image Source Selection */}
+              <View style={{ marginBottom: 16 }}>
+                <Text style={styles.uploadFieldLabel}>PRESCRIPTION IMAGE (CAMERA OR GALLERY):</Text>
+                <View style={{ flexDirection: 'row', gap: 10, marginTop: 6 }}>
+                  <TouchableOpacity
+                    style={styles.sourceBtnCamera}
+                    onPress={handleTakePhoto}
+                    activeOpacity={0.8}
+                    disabled={isUploadingPrescription}
+                  >
+                    <Feather name="camera" size={18} color="#0284c7" />
+                    <Text style={styles.sourceBtnCameraText}>Take Photo</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.sourceBtnGallery}
+                    onPress={handlePickFromGallery}
+                    activeOpacity={0.8}
+                    disabled={isUploadingPrescription}
+                  >
+                    <Feather name="image" size={18} color="#475569" />
+                    <Text style={styles.sourceBtnGalleryText}>Choose Gallery</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              {/* Image Preview Box */}
+              {uploadImageUri ? (
+                <View style={styles.uploadPreviewContainer}>
+                  <Image source={{ uri: uploadImageUri }} style={styles.uploadPreviewImage} resizeMode="contain" />
+                  <TouchableOpacity
+                    style={styles.uploadRemoveBtn}
+                    onPress={() => {
+                      setUploadImageUri(null);
+                      setUploadImageBase64(null);
+                    }}
+                    activeOpacity={0.75}
+                  >
+                    <Feather name="trash-2" size={13} color="#ffffff" />
+                    <Text style={styles.uploadRemoveBtnText}>Remove / Retake</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.uploadPlaceholderBox}>
+                  <MaterialCommunityIcons name="cloud-upload-outline" size={32} color="#94a3b8" />
+                  <Text style={styles.uploadPlaceholderText}>
+                    No photo selected yet. Tap Take Photo or Choose Gallery above.
+                  </Text>
+                </View>
+              )}
+
+              {/* Action Buttons */}
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 18 }}>
+                <TouchableOpacity
+                  style={styles.uploadCancelBtn}
+                  onPress={() => setUploadModalVisible(false)}
+                  disabled={isUploadingPrescription}
+                >
+                  <Text style={styles.uploadCancelBtnText}>Cancel</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.uploadSubmitBtn,
+                    (!uploadImageUri || isUploadingPrescription) && styles.uploadSubmitBtnDisabled
+                  ]}
+                  onPress={handleSaveUploadedPrescription}
+                  disabled={!uploadImageUri || isUploadingPrescription}
+                  activeOpacity={0.85}
+                >
+                  {isUploadingPrescription ? (
+                    <ActivityIndicator size="small" color="#ffffff" />
+                  ) : (
+                    <>
+                      <MaterialCommunityIcons name="cloud-check" size={18} color="#ffffff" />
+                      <Text style={styles.uploadSubmitBtnText}>Save Prescription</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          </View>
         </View>
       </Modal>
     </View>
@@ -2210,26 +3839,971 @@ const styles = StyleSheet.create({
     color: '#64748b',
     marginTop: 2,
   },
+  visitStatusBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  pillUpi: {
+    backgroundColor: '#eff6ff',
+    borderColor: '#bfdbfe',
+  },
+  pillCash: {
+    backgroundColor: '#f0fdf4',
+    borderColor: '#bbf7d0',
+  },
+  pillCard: {
+    backgroundColor: '#faf5ff',
+    borderColor: '#e9d5ff',
+  },
+  pillSplit: {
+    backgroundColor: '#fff7ed',
+    borderColor: '#fed7aa',
+  },
+  pillDefault: {
+    backgroundColor: '#f1f5f9',
+    borderColor: '#cbd5e1',
+  },
+  textUpi: {
+    color: '#2563eb',
+  },
+  textCash: {
+    color: '#16a34a',
+  },
+  textCard: {
+    color: '#9333ea',
+  },
+  textSplit: {
+    color: '#ea580c',
+  },
+  textDefault: {
+    color: '#475569',
+  },
+  allImagesBannerCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    padding: 12,
+    marginBottom: 12,
+    shadowColor: '#0f172a',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  allImagesHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+    paddingBottom: 6,
+  },
+  allImagesTitle: {
+    fontSize: 12.5,
+    fontWeight: '800',
+    color: '#0f172a',
+  },
+  allImagesSub: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+  allImageCard: {
+    width: 90,
+    height: 90,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: '#cbd5e1',
+    overflow: 'hidden',
+    position: 'relative',
+    backgroundColor: '#f8fafc',
+  },
+  allImageThumbnail: {
+    width: '100%',
+    height: '100%',
+  },
+  allImageBadge: {
+    position: 'absolute',
+    top: 3,
+    left: 3,
+    backgroundColor: 'rgba(15, 23, 42, 0.75)',
+    paddingHorizontal: 4,
+    paddingVertical: 1.5,
+    borderRadius: 3,
+  },
+  allImageBadgeText: {
+    fontSize: 8.5,
+    fontWeight: '800',
+    color: '#ffffff',
+  },
+  billingSummaryCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    padding: 12,
+    marginBottom: 12,
+    shadowColor: '#0f172a',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  billingSummaryLabel: {
+    fontSize: 9.5,
+    fontWeight: '800',
+    color: '#64748b',
+    letterSpacing: 0.5,
+  },
+  billingSummaryAmount: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: '#16a34a',
+    marginTop: 1,
+  },
+  billingSummaryVisitsCount: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#0284c7',
+    marginTop: 2,
+  },
+  billingVisitsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+    flexWrap: 'wrap',
+  },
+  billingVisitPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    paddingHorizontal: 8,
+    paddingVertical: 3.5,
+    borderRadius: 6,
+  },
+  billingVisitPillNum: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#475569',
+  },
+  billingVisitPillAmount: {
+    fontSize: 10.5,
+    fontWeight: '900',
+    color: '#16a34a',
+  },
+  billingVisitPillMode: {
+    fontSize: 9.5,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+  paymentDatesBox: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+    gap: 4,
+  },
+  paymentDateItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  paymentDateLabel: {
+    fontSize: 10.5,
+    fontWeight: '700',
+    color: '#64748b',
+    width: 110,
+  },
+  paymentDateVal: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0f172a',
+    flex: 1,
+  },
+  prescriptionImgGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 6,
+  },
+  prescriptionImgCard: {
+    width: 84,
+    height: 84,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: '#cbd5e1',
+    overflow: 'hidden',
+    position: 'relative',
+    backgroundColor: '#f1f5f9',
+  },
+  prescriptionImgBadge: {
+    position: 'absolute',
+    top: 3,
+    left: 3,
+    backgroundColor: '#0284c7',
+    paddingHorizontal: 5,
+    paddingVertical: 1.5,
+    borderRadius: 3,
+  },
+  prescriptionImgBadgeText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#ffffff',
+  },
+  historySortToolbar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  historySortCountText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  sortToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#f0f9ff',
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  sortToggleBtnText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#0284c7',
+  },
+  prescriptionGrid2x2: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  prescriptionGridItem: {
+    width: '48.5%',
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: '#e2e8f0',
+    padding: 8,
+    marginBottom: 10,
+    shadowColor: '#0f172a',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  prescriptionGridHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+    paddingBottom: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  prescriptionProperBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#f0f9ff',
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  prescriptionProperBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#0284c7',
+  },
+  prescriptionGridDateText: {
+    fontSize: 9.5,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  prescriptionGridImageFrame: {
+    width: '100%',
+    height: 135,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    backgroundColor: '#f8fafc',
+    overflow: 'hidden',
+    position: 'relative',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  prescriptionProperImage: {
+    width: '100%',
+    height: '100%',
+  },
+  prescriptionGridZoomBadge: {
+    position: 'absolute',
+    bottom: 5,
+    right: 5,
+    backgroundColor: 'rgba(15, 23, 42, 0.75)',
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // --- Lightbox Modal Styles ---
   imageLightboxOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.94)',
+    backgroundColor: 'rgba(0, 0, 0, 0.95)',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  imageLightboxCloseBtn: {
+  lightboxTopToolbar: {
     position: 'absolute',
-    top: 40,
-    right: 20,
-    zIndex: 10,
-    width: 40,
-    height: 40,
+    top: Platform.OS === 'android' ? 20 : 44,
+    left: 16,
+    right: 16,
+    zIndex: 50,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  lightboxCounterBadge: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
     borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.25)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
+  },
+  lightboxCounterText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  lightboxToolbarBtn: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
+  },
+  lightboxToolbarBtnText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  lightboxCloseBtn: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
+  },
+  lightboxImageArea: {
+    width: '100%',
+    height: '80%',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   imageLightboxImage: {
-    width: Dimensions.get('window').width - 24,
-    height: Dimensions.get('window').height - 120,
+    width: '92%',
+    height: '92%',
+  },
+  lightboxNavBtn: {
+    position: 'absolute',
+    top: '50%',
+    marginTop: -28,
+    width: 48,
+    height: 56,
+    borderRadius: 10,
+    backgroundColor: 'rgba(15, 23, 42, 0.65)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 40,
+  },
+  lightboxNavBtnLeft: {
+    left: 10,
+  },
+  lightboxNavBtnRight: {
+    right: 10,
+  },
+  lightboxBottomHint: {
+    position: 'absolute',
+    bottom: 25,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  lightboxBottomHintText: {
+    color: '#cbd5e1',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  // --- Profile Switcher Bar Styles ---
+  profileSelectorBar: {
+    backgroundColor: '#f0f9ff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#bae6fd',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+  },
+  profileSelectorTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  profileSelectorTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#0369a1',
+    letterSpacing: 0.2,
+  },
+  profileSelectorHint: {
+    fontSize: 10.5,
+    color: '#0284c7',
+    fontWeight: '500',
+  },
+  profileChipsScrollContent: {
+    gap: 8,
+    paddingVertical: 2,
+  },
+  profileTabChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#ffffff',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: '#cbd5e1',
+  },
+  profileTabChipActive: {
+    backgroundColor: '#0284c7',
+    borderColor: '#0284c7',
+    shadowColor: '#0284c7',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3,
+    elevation: 3,
+  },
+  profileTabChipText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#334155',
+  },
+  profileTabChipTextActive: {
+    color: '#ffffff',
+  },
+  profileCountBadge: {
+    backgroundColor: '#e2e8f0',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 10,
+  },
+  profileCountBadgeActive: {
+    backgroundColor: 'rgba(255, 255, 255, 0.25)',
+  },
+  profileCountBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#475569',
+  },
+  profileCountBadgeTextActive: {
+    color: '#ffffff',
+  },
+  // --- Upload Rx Action Buttons ---
+  uploadRxActionBtn: {
+    backgroundColor: '#0284c7',
+    borderRadius: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: '#0369a1',
+  },
+  uploadRxActionBtnText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  uploadRxActionBtnSub: {
+    color: '#e0f2fe',
+    fontSize: 9.5,
+    fontWeight: '500',
+  },
+  uploadRxBannerBtn: {
+    backgroundColor: '#eff6ff',
+    borderWidth: 1.5,
+    borderColor: '#bfdbfe',
+    borderRadius: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 12,
+    marginBottom: 14,
+  },
+  uploadRxBannerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  uploadRxBannerIconBox: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#dbeafe',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  uploadRxBannerTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#1e3a8a',
+  },
+  uploadRxBannerSub: {
+    fontSize: 11,
+    color: '#3b82f6',
+    marginTop: 2,
+  },
+  uploadRxBannerPill: {
+    backgroundColor: '#0284c7',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+  },
+  uploadRxBannerPillText: {
+    color: '#ffffff',
+    fontSize: 11.5,
+    fontWeight: '800',
+  },
+  // --- Upload Modal Styles ---
+  uploadModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  uploadModalCard: {
+    width: '100%',
+    maxHeight: '90%',
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    overflow: 'hidden',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.25,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  uploadModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    backgroundColor: '#f8fafc',
+  },
+  uploadModalTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0f172a',
+  },
+  uploadModalSub: {
+    fontSize: 11.5,
+    color: '#64748b',
+    marginTop: 2,
+  },
+  uploadModalCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  uploadFieldLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#475569',
+    letterSpacing: 0.3,
+  },
+  uploadProfilePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    backgroundColor: '#f8fafc',
+  },
+  uploadProfilePillActive: {
+    backgroundColor: '#0284c7',
+    borderColor: '#0284c7',
+  },
+  uploadProfilePillText: {
+    fontSize: 11.5,
+    fontWeight: '600',
+    color: '#334155',
+  },
+  uploadProfilePillTextActive: {
+    color: '#ffffff',
+    fontWeight: '800',
+  },
+  uploadDateInputBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    marginTop: 6,
+  },
+  uploadDateInput: {
+    flex: 1,
+    fontSize: 13,
+    color: '#0f172a',
+    paddingVertical: 0,
+    paddingHorizontal: 8,
+    fontWeight: '600',
+  },
+  quickDateChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  quickDateChipActive: {
+    backgroundColor: '#e0f2fe',
+    borderColor: '#0284c7',
+  },
+  quickDateChipText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#475569',
+  },
+  quickDateChipTextActive: {
+    color: '#0284c7',
+    fontWeight: '800',
+  },
+  sourceBtnCamera: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 8,
+    backgroundColor: '#e0f2fe',
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+  },
+  sourceBtnCameraText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0284c7',
+  },
+  sourceBtnGallery: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 8,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  sourceBtnGalleryText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#334155',
+  },
+  uploadPreviewContainer: {
+    width: '100%',
+    height: 180,
+    backgroundColor: '#0f172a',
+    borderRadius: 10,
+    overflow: 'hidden',
+    position: 'relative',
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+  },
+  uploadPreviewImage: {
+    width: '100%',
+    height: '100%',
+  },
+  uploadRemoveBtn: {
+    position: 'absolute',
+    bottom: 8,
+    right: 8,
+    backgroundColor: 'rgba(239, 68, 68, 0.9)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  uploadRemoveBtnText: {
+    color: '#ffffff',
+    fontSize: 10.5,
+    fontWeight: '700',
+  },
+  uploadPlaceholderBox: {
+    height: 120,
+    borderWidth: 1.5,
+    borderColor: '#cbd5e1',
+    borderStyle: 'dashed',
+    borderRadius: 10,
+    backgroundColor: '#f8fafc',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 16,
+  },
+  uploadPlaceholderText: {
+    color: '#94a3b8',
+    fontSize: 11.5,
+    textAlign: 'center',
+    marginTop: 6,
+    lineHeight: 16,
+  },
+  uploadCancelBtn: {
+    flex: 1,
+    paddingVertical: 11,
+    borderRadius: 8,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    alignItems: 'center',
+  },
+  uploadCancelBtnText: {
+    color: '#475569',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  uploadSubmitBtn: {
+    flex: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 11,
+    borderRadius: 8,
+    backgroundColor: '#0284c7',
+  },
+  uploadSubmitBtnDisabled: {
+    backgroundColor: '#94a3b8',
+    opacity: 0.6,
+  },
+  prescriptionGridDeleteBtn: {
+    padding: 3,
+    borderRadius: 6,
+    backgroundColor: '#fee2e2',
+    borderWidth: 1,
+    borderColor: '#fecaca',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 4,
+  },
+  prescriptionImgCardWrapper: {
+    position: 'relative',
+  },
+  thumbnailDeleteBtn: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    backgroundColor: 'rgba(220, 38, 38, 0.9)',
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10,
+    elevation: 4,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.25,
+    shadowRadius: 2,
+  },
+  lightboxDeleteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(220, 38, 38, 0.85)',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.25)',
+  },
+  lightboxDeleteBtnText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  // --- Confirmation Modal Styles ---
+  confirmModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.72)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+    zIndex: 9999,
+  },
+  confirmModalCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#ffffff',
+    borderRadius: 18,
+    padding: 20,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 14,
+    elevation: 12,
+  },
+  confirmModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  confirmTrashIconBox: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#fee2e2',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  confirmModalTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0f172a',
+  },
+  confirmModalSub: {
+    fontSize: 12.5,
+    color: '#64748b',
+    marginTop: 2,
+  },
+  confirmImagePreviewBox: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    overflow: 'hidden',
+    marginBottom: 12,
+    padding: 10,
+    alignItems: 'center',
+  },
+  confirmImagePreview: {
+    width: '100%',
+    height: 140,
+    borderRadius: 8,
+    backgroundColor: '#0f172a',
+  },
+  confirmImageMeta: {
+    width: '100%',
+    marginTop: 8,
+    gap: 3,
+  },
+  confirmImageMetaText: {
+    fontSize: 12,
+    color: '#475569',
+    fontWeight: '500',
+  },
+  confirmWarningText: {
+    fontSize: 11.5,
+    color: '#b91c1c',
+    lineHeight: 16,
+    marginBottom: 16,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  confirmButtonsRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  confirmCancelBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  confirmCancelBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  confirmDeleteBtn: {
+    flex: 1.3,
+    flexDirection: 'row',
+    gap: 6,
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: '#dc2626',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 2,
+  },
+  confirmDeleteBtnDisabled: {
+    opacity: 0.6,
+  },
+  confirmDeleteBtnText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#ffffff',
+  },
+  uploadSubmitBtnText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '800',
   },
 });

@@ -1,19 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { View, StyleSheet, TouchableOpacity, ScrollView, Share, Alert, Platform, Modal, ActivityIndicator } from 'react-native';
+import { View, StyleSheet, TouchableOpacity, ScrollView, Share, Alert, Platform, Modal, ActivityIndicator, Linking } from 'react-native';
 import { Text, Surface, Avatar, IconButton, Badge, Portal, TextInput, Button } from 'react-native-paper';
 import { COLORS, SIZES } from '../constants/theme';
 import { useAuth } from '../context/AuthContext';
-import { 
+import {
   User, Phone, Mail, Calendar, Edit3, 
   Bell, ChevronLeft, ChevronRight, LayoutGrid, 
   History, FileHeart, CreditCard, ShieldCheck, 
   MapPin, HelpCircle, Info, LogOut, FileText, Coins, HeartPulse,
-  Stethoscope, Clock, CheckCircle2, AlertCircle, ArrowRight
+  Stethoscope, Clock, CheckCircle2, AlertCircle, ArrowRight,
+  Film, ExternalLink
 } from 'lucide-react-native';
 import { auth, db } from '../firebase';
 import { doc, updateDoc, setDoc, onSnapshot, collection, query, where } from 'firebase/firestore';
 import { SafeAreaView } from 'react-native-safe-area-context';
-
 const ProfileScreen = ({ navigation }) => {
   const { userData, user } = useAuth();
   const [editVisible, setEditVisible] = useState(false);
@@ -26,6 +26,11 @@ const ProfileScreen = ({ navigation }) => {
   // Follow-up state
   const [followUps, setFollowUps] = useState([]);
   const [followUpsLoading, setFollowUpsLoading] = useState(true);
+
+  // My Media state (Links shared by doctor from reception media manager)
+  const [myMediaVisible, setMyMediaVisible] = useState(false);
+  const [myMediaList, setMyMediaList] = useState([]);
+  const [mediaLoading, setMediaLoading] = useState(true);
 
   useEffect(() => {
     if (!auth.currentUser?.uid) return;
@@ -95,6 +100,56 @@ const ProfileScreen = ({ navigation }) => {
       setFollowUpsLoading(false);
     }
   }, [userData, user, auth.currentUser]);
+
+  // Real-time listener for My Media shared by doctor
+  useEffect(() => {
+    const rawPhone = userData?.phone || user?.phoneNumber || auth.currentUser?.phoneNumber || '';
+    const cleanPhone = String(rawPhone).replace(/\D/g, '').slice(-10);
+    const uid = auth.currentUser?.uid || user?.uid;
+
+    if (!cleanPhone && !uid) {
+      setMediaLoading(false);
+      return;
+    }
+
+    const itemsMap = new Map();
+
+    const unsubCol = onSnapshot(collection(db, 'shared_patient_media'), (snap) => {
+      snap.forEach((d) => {
+        const data = d.data();
+        const pPhone = String(data.patientPhone || '').replace(/\D/g, '').slice(-10);
+        if (pPhone && cleanPhone && pPhone === cleanPhone) {
+          itemsMap.set(data.url || d.id, { id: d.id, ...data });
+        }
+      });
+      const arr = Array.from(itemsMap.values());
+      arr.sort((a, b) => (b.sharedAt || '').localeCompare(a.sharedAt || ''));
+      setMyMediaList(arr);
+      setMediaLoading(false);
+    }, (err) => console.log('Media listener error:', err));
+
+    let unsubDoc = null;
+    if (uid) {
+      unsubDoc = onSnapshot(doc(db, 'patients', uid), (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          if (Array.isArray(data.sharedMedia)) {
+            data.sharedMedia.forEach(m => {
+              if (m.url) itemsMap.set(m.url, m);
+            });
+            const arr = Array.from(itemsMap.values());
+            arr.sort((a, b) => (b.sharedAt || '').localeCompare(a.sharedAt || ''));
+            setMyMediaList(arr);
+          }
+        }
+      }, () => {});
+    }
+
+    return () => {
+      unsubCol();
+      if (unsubDoc) unsubDoc();
+    };
+  }, [userData?.phone, user?.phoneNumber, auth.currentUser?.uid]);
 
   const formatFollowUpDate = (dateStr) => {
     if (!dateStr) return 'Date to be confirmed';
@@ -370,6 +425,13 @@ const ProfileScreen = ({ navigation }) => {
             onPress={() => navigation.navigate('MedicineFormView')} 
           />
           <SettingItem 
+            icon={Film} 
+            title="My Media" 
+            subtitle={myMediaList.length > 0 ? `${myMediaList.length} media link(s) shared by doctor` : "Educational guides, exercises & clinical links"} 
+            color="#0284c7" 
+            onPress={() => setMyMediaVisible(true)} 
+          />
+          <SettingItem 
             icon={ShieldCheck} 
             title="Privacy & Security" 
             subtitle="Manage your account security" 
@@ -476,6 +538,106 @@ const ProfileScreen = ({ navigation }) => {
             </Button>
             <Button onPress={() => setEditVisible(false)} textColor={COLORS.muted}>
               Cancel
+            </Button>
+          </Surface>
+        </View>
+      </Modal>
+
+      {/* My Media Modal */}
+      <Modal
+        visible={myMediaVisible}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setMyMediaVisible(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <Surface style={[styles.modal, { maxHeight: '82%', padding: 20 }]}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: '#e0f2fe', justifyContent: 'center', alignItems: 'center' }}>
+                  <Film size={20} color="#0284c7" />
+                </View>
+                <View>
+                  <Text style={{ fontSize: 17, fontWeight: '800', color: COLORS.text }}>My Media</Text>
+                  <Text style={{ fontSize: 11, color: '#64748b' }}>Videos, guides & links shared by your doctor</Text>
+                </View>
+              </View>
+              <IconButton icon="close" size={22} onPress={() => setMyMediaVisible(false)} />
+            </View>
+
+            {mediaLoading ? (
+              <ActivityIndicator size="small" color={COLORS.secondary} style={{ padding: 30 }} />
+            ) : myMediaList.length === 0 ? (
+              <View style={{ padding: 26, alignItems: 'center' }}>
+                <Film size={36} color="#cbd5e1" style={{ marginBottom: 10 }} />
+                <Text style={{ fontSize: 14, fontWeight: '700', color: '#1e293b', marginBottom: 4 }}>No Media Links Shared Yet</Text>
+                <Text style={{ fontSize: 11.5, color: '#64748b', textAlign: 'center', lineHeight: 17 }}>
+                  When your doctor shares diet videos, exercises, or clinical links during your consultation, they will appear here.
+                </Text>
+              </View>
+            ) : (
+              <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 380 }}>
+                <View style={{ gap: 10 }}>
+                  {myMediaList.map((item, idx) => (
+                    <View key={item.id || idx} style={{
+                      backgroundColor: '#f8fafc',
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: '#e2e8f0',
+                      padding: 12,
+                      gap: 5
+                    }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                        <Text style={{ fontSize: 13.5, fontWeight: '800', color: '#0f172a', flex: 1 }}>
+                          {item.title || 'Educational Link'}
+                        </Text>
+                        {item.category && (
+                          <View style={{ backgroundColor: '#e0f2fe', paddingHorizontal: 7, paddingVertical: 2, borderRadius: 5 }}>
+                            <Text style={{ fontSize: 9.5, fontWeight: '700', color: '#0284c7' }}>
+                              {item.category}
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+
+                      {item.notes ? (
+                        <Text style={{ fontSize: 11.5, color: '#475569', lineHeight: 16 }}>{item.notes}</Text>
+                      ) : null}
+
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 4, paddingTop: 6, borderTopWidth: 1, borderTopColor: '#f1f5f9' }}>
+                        <Text style={{ fontSize: 10.5, color: '#64748b' }}>
+                          {item.doctorName ? `By ${item.doctorName}` : 'Shared by Clinic'}
+                        </Text>
+
+                        <TouchableOpacity
+                          onPress={() => Linking.openURL(item.url).catch(() => Alert.alert('Invalid Link', item.url))}
+                          style={{
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            gap: 4,
+                            backgroundColor: COLORS.secondary,
+                            paddingHorizontal: 10,
+                            paddingVertical: 5,
+                            borderRadius: 6
+                          }}
+                        >
+                          <ExternalLink size={12} color="#ffffff" />
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: '#ffffff' }}>Open Media</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              </ScrollView>
+            )}
+
+            <Button
+              mode="outlined"
+              onPress={() => setMyMediaVisible(false)}
+              style={{ marginTop: 12, borderColor: '#cbd5e1' }}
+              textColor="#475569"
+            >
+              Close
             </Button>
           </Surface>
         </View>

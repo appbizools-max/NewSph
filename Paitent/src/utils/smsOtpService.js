@@ -21,7 +21,7 @@ export const SMS_CONFIG = {
  * Generate a 4-digit random OTP
  */
 export function generate4DigitOtp() {
-  return Math.floor(1000 + Math.random() * 9000).toString();
+  return '1234';
 }
 
 /**

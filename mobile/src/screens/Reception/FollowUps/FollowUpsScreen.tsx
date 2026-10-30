@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useCallback, memo } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Linking, ActivityIndicator, ScrollView, Modal, TextInput, Alert, Platform } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, Linking, ActivityIndicator, ScrollView, Modal, TextInput, Alert, Platform, BackHandler } from 'react-native';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { sendBookingWhatsAppNotification, sendRescheduleWhatsAppNotification, sendBookingSMS, sendRescheduleSMS, CanonicalBranchId, resolveCanonicalBranchId, getBranchQueryNames, sanitizeDoctorName } from '@app/shared';
 import { getSafeDb, collection, onSnapshot, query, limit, updateDoc, doc, addDoc, orderBy, getDocs, where, setDoc } from '../../../utils/firebaseSafe';
@@ -26,6 +26,8 @@ interface FollowUpsScreenProps {
   currentBranch?: string;
   branchId?: CanonicalBranchId;
   onNavigate?: (tab: string, data?: any) => void;
+  onBack?: () => boolean | void;
+  isActive?: boolean;
 }
 
 type FilterMode = 'today' | 'overdue' | 'this_month' | 'next_month' | 'selected_month' | 'custom_date' | 'all';
@@ -639,7 +641,9 @@ const FollowUpCardItem = memo(({
 export const FollowUpsScreen: React.FC<FollowUpsScreenProps> = ({
   currentBranch = 'KPHB Branch',
   branchId,
-  onNavigate
+  onNavigate,
+  onBack,
+  isActive = true,
 }) => {
   const [filterMode, setFilterMode] = useState<FilterMode>('today');
   const [customDateISO, setCustomDateISO] = useState<string>(() => todayStr);
@@ -678,6 +682,65 @@ export const FollowUpsScreen: React.FC<FollowUpsScreenProps> = ({
   const [calendarModalVisible, setCalendarModalVisible] = useState<boolean>(false);
   const [calMonth, setCalMonth] = useState<number>(new Date().getMonth());
   const [calYear, setCalYear] = useState<number>(new Date().getFullYear());
+
+  // Native Android Hardware Back Navigation Handler
+  useEffect(() => {
+    if (!isActive) return;
+
+    const onHardwareBack = () => {
+      console.log('>>> [BACK_EVENT] FollowUpsScreen onHardwareBack called! isActive:', isActive);
+      // 1. Close internal modals first if any is open
+      if (calendarModalVisible) {
+        setCalendarModalVisible(false);
+        return true;
+      }
+      if (monthFilterModalVisible) {
+        setMonthFilterModalVisible(false);
+        return true;
+      }
+      if (customDatePickerVisible) {
+        setCustomDatePickerVisible(false);
+        return true;
+      }
+      if (rescheduleDatePickerVisible) {
+        setRescheduleDatePickerVisible(false);
+        return true;
+      }
+      if (rescheduleModalItem) {
+        setRescheduleModalItem(null);
+        return true;
+      }
+      if (bookModalItem) {
+        setBookModalItem(null);
+        return true;
+      }
+
+      // 2. Otherwise navigate cleanly back to Dashboard order-wise
+      if (onBack) {
+        const res = onBack();
+        console.log('>>> [BACK_EVENT] FollowUpsScreen onBack result:', res);
+        return true;
+      }
+      if (onNavigate) {
+        onNavigate('reception_dashboard');
+        return true;
+      }
+      return true;
+    };
+
+    const backSub = BackHandler.addEventListener('hardwareBackPress', onHardwareBack);
+    return () => backSub.remove();
+  }, [
+    isActive,
+    calendarModalVisible,
+    monthFilterModalVisible,
+    customDatePickerVisible,
+    rescheduleDatePickerVisible,
+    rescheduleModalItem,
+    bookModalItem,
+    onBack,
+    onNavigate
+  ]);
 
   const handlePrevMonth = () => {
     if (calMonth === 0) {
@@ -941,7 +1004,7 @@ export const FollowUpsScreen: React.FC<FollowUpsScreenProps> = ({
         if (typeof resolveCanonicalBranchId === 'function') {
           return resolveCanonicalBranchId(val);
         }
-      } catch (_) {}
+      } catch (_) { }
       if (!val || typeof val !== 'string') return null;
       const l = val.toLowerCase();
       if (l.includes('kphb') || l.includes('kpb')) return 'kphb';
@@ -1374,7 +1437,7 @@ export const FollowUpsScreen: React.FC<FollowUpsScreenProps> = ({
         setRescheduleCalYear(parseInt(parts[0], 10));
         setRescheduleCalMonth(parseInt(parts[1], 10) - 1);
       }
-    } catch (_) {}
+    } catch (_) { }
   }, []);
 
   const handleShiftRescheduleDays = useCallback((daysToAdd: number) => {
@@ -1418,11 +1481,11 @@ export const FollowUpsScreen: React.FC<FollowUpsScreenProps> = ({
             branchName: rescheduleModalItem.branchName || currentBranch,
             diseases: rescheduleModalItem.diseases,
             ...updatePayload
-          }, { merge: true }).catch(() => {});
+          }, { merge: true }).catch(() => { });
 
           const otherCollections = ['appointments', 'allpatients', 'prescriptions', 'patients'];
           for (const col of otherCollections) {
-            updateDoc(doc(activeDb, col, rawId), updatePayload).catch(() => {});
+            updateDoc(doc(activeDb, col, rawId), updatePayload).catch(() => { });
           }
         } else if (cleanPhone) {
           await setDoc(doc(activeDb, 'followups', `${cleanPhone}_followup`), {
@@ -1433,7 +1496,7 @@ export const FollowUpsScreen: React.FC<FollowUpsScreenProps> = ({
             branchName: rescheduleModalItem.branchName || currentBranch,
             diseases: rescheduleModalItem.diseases,
             ...updatePayload
-          }, { merge: true }).catch(() => {});
+          }, { merge: true }).catch(() => { });
         }
       }
 
@@ -1807,7 +1870,6 @@ export const FollowUpsScreen: React.FC<FollowUpsScreenProps> = ({
                   </View>
                 </ScrollView>
               )}
-
               <View style={{ flexDirection: 'row', gap: 10, justifyContent: 'flex-end', marginTop: 10 }}>
                 <TouchableOpacity
                   style={styles.cancelBtn}
@@ -1829,285 +1891,289 @@ export const FollowUpsScreen: React.FC<FollowUpsScreenProps> = ({
       )}
 
       {/* ================= CALENDAR POPUP MODAL (MOBILE) ================= */}
-      <Modal
-        transparent
-        animationType="fade"
-        visible={calendarModalVisible}
-        onRequestClose={() => setCalendarModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalCard, { maxWidth: 340, padding: 16 }]}>
-            {/* Header with Prev, Month Year, Next */}
-            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-              <TouchableOpacity
-                onPress={handlePrevMonth}
-                style={{ padding: 6, backgroundColor: '#f1f5f9', borderRadius: 8 }}
-              >
-                <Feather name="chevron-left" size={18} color="#0284c7" />
-              </TouchableOpacity>
-              <Text style={{ fontSize: 14.5, fontWeight: '800', color: '#0f172a' }}>
-                {monthNames[calMonth]} {calYear}
-              </Text>
-              <TouchableOpacity
-                onPress={handleNextMonth}
-                style={{ padding: 6, backgroundColor: '#f1f5f9', borderRadius: 8 }}
-              >
-                <Feather name="chevron-right" size={18} color="#0284c7" />
-              </TouchableOpacity>
-            </View>
-
-            {/* Weekday Names Header */}
-            <View style={{ flexDirection: 'row', justifyContent: 'space-around', marginBottom: 8 }}>
-              {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
-                <Text key={d} style={{ width: 34, textAlign: 'center', fontSize: 10.5, fontWeight: '700', color: '#64748b' }}>
-                  {d}
+      {calendarModalVisible && (
+        <Modal
+          transparent
+          animationType="fade"
+          visible={calendarModalVisible}
+          onRequestClose={() => setCalendarModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalCard, { maxWidth: 340, padding: 16 }]}>
+              {/* Header with Prev, Month Year, Next */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                <TouchableOpacity
+                  onPress={handlePrevMonth}
+                  style={{ padding: 6, backgroundColor: '#f1f5f9', borderRadius: 8 }}
+                >
+                  <Feather name="chevron-left" size={18} color="#0284c7" />
+                </TouchableOpacity>
+                <Text style={{ fontSize: 14.5, fontWeight: '800', color: '#0f172a' }}>
+                  {monthNames[calMonth]} {calYear}
                 </Text>
-              ))}
+                <TouchableOpacity
+                  onPress={handleNextMonth}
+                  style={{ padding: 6, backgroundColor: '#f1f5f9', borderRadius: 8 }}
+                >
+                  <Feather name="chevron-right" size={18} color="#0284c7" />
+                </TouchableOpacity>
+              </View>
+
+              {/* Weekday Names Header */}
+              <View style={{ flexDirection: 'row', justifyContent: 'space-around', marginBottom: 8 }}>
+                {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
+                  <Text key={d} style={{ width: 34, textAlign: 'center', fontSize: 10.5, fontWeight: '700', color: '#64748b' }}>
+                    {d}
+                  </Text>
+                ))}
+              </View>
+              {/* Month Days Grid */}
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+                {Array.from({ length: startDayIndex }).map((_, i) => (
+                  <View key={`empty-${i}`} style={{ width: `${100 / 7}%`, height: 36 }} />
+                ))}
+                {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((dayNum) => {
+                  const formattedMonth = (calMonth + 1) < 10 ? `0${calMonth + 1}` : `${calMonth + 1}`;
+                  const formattedDay = dayNum < 10 ? `0${dayNum}` : `${dayNum}`;
+                  const dayStr = `${formattedDay}-${formattedMonth}-${calYear}`;
+                  const isSelected = bookingDate === dayStr;
+
+                  return (
+                    <View key={dayNum} style={{ width: `${100 / 7}%`, height: 36, alignItems: 'center', justifyContent: 'center', marginVertical: 2 }}>
+                      <TouchableOpacity
+                        onPress={() => handleSelectDay(dayNum)}
+                        style={[
+                          {
+                            width: 32,
+                            height: 32,
+                            borderRadius: 16,
+                            alignItems: 'center',
+                            justifyContent: 'center'
+                          },
+                          isSelected ? { backgroundColor: '#0284c7' } : { backgroundColor: '#f8fafc' }
+                        ]}
+                      >
+                        <Text style={{
+                          fontSize: 12,
+                          fontWeight: isSelected ? '800' : '600',
+                          color: isSelected ? '#ffffff' : '#0f172a'
+                        }}>
+                          {dayNum}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })}
+              </View>
+
+              <TouchableOpacity
+                onPress={() => setCalendarModalVisible(false)}
+                style={{ marginTop: 14, backgroundColor: '#f1f5f9', paddingVertical: 9, borderRadius: 8, alignItems: 'center' }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: '700', color: '#475569' }}>Close Calendar</Text>
+              </TouchableOpacity>
             </View>
-
-            {/* Month Days Grid */}
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-              {Array.from({ length: startDayIndex }).map((_, i) => (
-                <View key={`empty-${i}`} style={{ width: `${100 / 7}%`, height: 36 }} />
-              ))}
-              {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((dayNum) => {
-                const formattedMonth = (calMonth + 1) < 10 ? `0${calMonth + 1}` : `${calMonth + 1}`;
-                const formattedDay = dayNum < 10 ? `0${dayNum}` : `${dayNum}`;
-                const dayStr = `${formattedDay}-${formattedMonth}-${calYear}`;
-                const isSelected = bookingDate === dayStr;
-
-                return (
-                  <View key={dayNum} style={{ width: `${100 / 7}%`, height: 36, alignItems: 'center', justifyContent: 'center', marginVertical: 2 }}>
-                    <TouchableOpacity
-                      onPress={() => handleSelectDay(dayNum)}
-                      style={[
-                        {
-                          width: 32,
-                          height: 32,
-                          borderRadius: 16,
-                          alignItems: 'center',
-                          justifyContent: 'center'
-                        },
-                        isSelected ? { backgroundColor: '#0284c7' } : { backgroundColor: '#f8fafc' }
-                      ]}
-                    >
-                      <Text style={{
-                        fontSize: 12,
-                        fontWeight: isSelected ? '800' : '600',
-                        color: isSelected ? '#ffffff' : '#0f172a'
-                      }}>
-                        {dayNum}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                );
-              })}
-            </View>
-
-            <TouchableOpacity
-              onPress={() => setCalendarModalVisible(false)}
-              style={{ marginTop: 14, backgroundColor: '#f1f5f9', paddingVertical: 9, borderRadius: 8, alignItems: 'center' }}
-            >
-              <Text style={{ fontSize: 12, fontWeight: '700', color: '#475569' }}>Close Calendar</Text>
-            </TouchableOpacity>
           </View>
-        </View>
-      </Modal>
+        </Modal>
+      )}
 
       {/* Month & Year Picker Modal */}
-      <Modal
-        visible={monthFilterModalVisible}
-        transparent={true}
-        animationType="fade"
-        onRequestClose={() => setMonthFilterModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.monthPickerModalCard}>
-            {/* Modal Header */}
-            <View style={styles.monthPickerHeader}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <Feather name="calendar" size={17} color="#0d9488" />
-                <Text style={styles.monthPickerTitle}>Select Month & Year</Text>
+      {monthFilterModalVisible && (
+        <Modal
+          visible={monthFilterModalVisible}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => setMonthFilterModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.monthPickerModalCard}>
+              {/* Modal Header */}
+              <View style={styles.monthPickerHeader}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <Feather name="calendar" size={17} color="#0d9488" />
+                  <Text style={styles.monthPickerTitle}>Select Month & Year</Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => setMonthFilterModalVisible(false)}
+                  style={styles.modalCloseBtn}
+                >
+                  <Feather name="x" size={18} color="#64748b" />
+                </TouchableOpacity>
               </View>
-              <TouchableOpacity
-                onPress={() => setMonthFilterModalVisible(false)}
-                style={styles.modalCloseBtn}
-              >
-                <Feather name="x" size={18} color="#64748b" />
-              </TouchableOpacity>
-            </View>
 
-            {/* Year Navigation */}
-            <View style={styles.yearSelectorRow}>
-              <TouchableOpacity
-                style={styles.yearNavBtn}
-                onPress={() => setSelectedFilterYear(prev => prev - 1)}
-              >
-                <Feather name="chevron-left" size={18} color="#0f172a" />
-              </TouchableOpacity>
-              <Text style={styles.yearDisplay}>{selectedFilterYear}</Text>
-              <TouchableOpacity
-                style={styles.yearNavBtn}
-                onPress={() => setSelectedFilterYear(prev => prev + 1)}
-              >
-                <Feather name="chevron-right" size={18} color="#0f172a" />
-              </TouchableOpacity>
-            </View>
+              {/* Year Navigation */}
+              <View style={styles.yearSelectorRow}>
+                <TouchableOpacity
+                  style={styles.yearNavBtn}
+                  onPress={() => setSelectedFilterYear(prev => prev - 1)}
+                >
+                  <Feather name="chevron-left" size={18} color="#0f172a" />
+                </TouchableOpacity>
+                <Text style={styles.yearDisplay}>{selectedFilterYear}</Text>
+                <TouchableOpacity
+                  style={styles.yearNavBtn}
+                  onPress={() => setSelectedFilterYear(prev => prev + 1)}
+                >
+                  <Feather name="chevron-right" size={18} color="#0f172a" />
+                </TouchableOpacity>
+              </View>
 
-            {/* 12 Months Grid */}
-            <View style={styles.monthsGrid}>
-              {MONTH_NAMES.map((name, index) => {
-                const isSelected = selectedFilterMonth === index;
-                return (
-                  <TouchableOpacity
-                    key={name}
-                    style={[styles.monthGridItem, isSelected && styles.monthGridItemSelected]}
-                    onPress={() => {
-                      setSelectedFilterMonth(index);
-                      setFilterMode('selected_month');
-                      setMonthFilterModalVisible(false);
-                    }}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[styles.monthGridText, isSelected && styles.monthGridTextSelected]}>
-                      {name.substring(0, 3)}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+              {/* 12 Months Grid */}
+              <View style={styles.monthsGrid}>
+                {MONTH_NAMES.map((name, index) => {
+                  const isSelected = selectedFilterMonth === index;
+                  return (
+                    <TouchableOpacity
+                      key={name}
+                      style={[styles.monthGridItem, isSelected && styles.monthGridItemSelected]}
+                      onPress={() => {
+                        setSelectedFilterMonth(index);
+                        setFilterMode('selected_month');
+                        setMonthFilterModalVisible(false);
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[styles.monthGridText, isSelected && styles.monthGridTextSelected]}>
+                        {name.substring(0, 3)}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
 
-            {/* Quick Actions */}
-            <View style={{ flexDirection: 'row', gap: 8, marginTop: 14 }}>
-              <TouchableOpacity
-                style={[styles.modalBtnSecondary, { flex: 1 }]}
-                onPress={() => {
-                  const now = new Date();
-                  setSelectedFilterMonth(now.getMonth());
-                  setSelectedFilterYear(now.getFullYear());
-                  setFilterMode('selected_month');
-                  setMonthFilterModalVisible(false);
-                }}
-              >
-                <Text style={styles.modalBtnSecondaryText}>This Month</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalBtnPrimary, { flex: 1, backgroundColor: '#0d9488' }]}
-                onPress={() => {
-                  setFilterMode('selected_month');
-                  setMonthFilterModalVisible(false);
-                }}
-              >
-                <Text style={styles.modalBtnPrimaryText}>Apply Filter</Text>
-              </TouchableOpacity>
+              {/* Quick Actions */}
+              <View style={{ flexDirection: 'row', gap: 8, marginTop: 14 }}>
+                <TouchableOpacity
+                  style={[styles.modalBtnSecondary, { flex: 1 }]}
+                  onPress={() => {
+                    const now = new Date();
+                    setSelectedFilterMonth(now.getMonth());
+                    setSelectedFilterYear(now.getFullYear());
+                    setFilterMode('selected_month');
+                    setMonthFilterModalVisible(false);
+                  }}
+                >
+                  <Text style={styles.modalBtnSecondaryText}>This Month</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.modalBtnPrimary, { flex: 1, backgroundColor: '#0d9488' }]}
+                  onPress={() => {
+                    setFilterMode('selected_month');
+                    setMonthFilterModalVisible(false);
+                  }}
+                >
+                  <Text style={styles.modalBtnPrimaryText}>Apply Filter</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           </View>
-        </View>
-      </Modal>
+        </Modal>
+      )}
 
       {/* ================= CUSTOM DATE PICKER MODAL ================= */}
-      <Modal
-        visible={customDatePickerVisible}
-        transparent={true}
-        animationType="fade"
-        onRequestClose={() => setCustomDatePickerVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalCard, { maxWidth: 340, padding: 16 }]}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-              <TouchableOpacity
-                onPress={() => {
-                  if (customCalMonth === 0) {
-                    setCustomCalMonth(11);
-                    setCustomCalYear(prev => prev - 1);
-                  } else {
-                    setCustomCalMonth(prev => prev - 1);
-                  }
-                }}
-                style={{ padding: 6, backgroundColor: '#f1f5f9', borderRadius: 8 }}
-              >
-                <Feather name="chevron-left" size={18} color="#0284c7" />
-              </TouchableOpacity>
-              <Text style={{ fontSize: 14.5, fontWeight: '800', color: '#0f172a' }}>
-                {monthNames[customCalMonth]} {customCalYear}
-              </Text>
-              <TouchableOpacity
-                onPress={() => {
-                  if (customCalMonth === 11) {
-                    setCustomCalMonth(0);
-                    setCustomCalYear(prev => prev + 1);
-                  } else {
-                    setCustomCalMonth(prev => prev + 1);
-                  }
-                }}
-                style={{ padding: 6, backgroundColor: '#f1f5f9', borderRadius: 8 }}
-              >
-                <Feather name="chevron-right" size={18} color="#0284c7" />
-              </TouchableOpacity>
-            </View>
-
-            <View style={{ flexDirection: 'row', justifyContent: 'space-around', marginBottom: 8 }}>
-              {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
-                <Text key={d} style={{ width: 34, textAlign: 'center', fontSize: 10.5, fontWeight: '700', color: '#64748b' }}>
-                  {d}
+      {customDatePickerVisible && (
+        <Modal
+          visible={customDatePickerVisible}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => setCustomDatePickerVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalCard, { maxWidth: 340, padding: 16 }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                <TouchableOpacity
+                  onPress={() => {
+                    if (customCalMonth === 0) {
+                      setCustomCalMonth(11);
+                      setCustomCalYear(prev => prev - 1);
+                    } else {
+                      setCustomCalMonth(prev => prev - 1);
+                    }
+                  }}
+                  style={{ padding: 6, backgroundColor: '#f1f5f9', borderRadius: 8 }}
+                >
+                  <Feather name="chevron-left" size={18} color="#0284c7" />
+                </TouchableOpacity>
+                <Text style={{ fontSize: 14.5, fontWeight: '800', color: '#0f172a' }}>
+                  {monthNames[customCalMonth]} {customCalYear}
                 </Text>
-              ))}
-            </View>
+                <TouchableOpacity
+                  onPress={() => {
+                    if (customCalMonth === 11) {
+                      setCustomCalMonth(0);
+                      setCustomCalYear(prev => prev + 1);
+                    } else {
+                      setCustomCalMonth(prev => prev + 1);
+                    }
+                  }}
+                  style={{ padding: 6, backgroundColor: '#f1f5f9', borderRadius: 8 }}
+                >
+                  <Feather name="chevron-right" size={18} color="#0284c7" />
+                </TouchableOpacity>
+              </View>
 
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-              {Array.from({ length: new Date(customCalYear, customCalMonth, 1).getDay() }).map((_, i) => (
-                <View key={`c-empty-${i}`} style={{ width: `${100 / 7}%`, height: 36 }} />
-              ))}
-              {Array.from({ length: new Date(customCalYear, customCalMonth + 1, 0).getDate() }).map((_, i) => {
-                const dayNum = i + 1;
-                const formattedMonth = (customCalMonth + 1) < 10 ? `0${customCalMonth + 1}` : `${customCalMonth + 1}`;
-                const formattedDay = dayNum < 10 ? `0${dayNum}` : `${dayNum}`;
-                const isoStr = `${customCalYear}-${formattedMonth}-${formattedDay}`;
-                const isSelected = customDateISO === isoStr;
-                const isToday = todayStr === isoStr;
+              <View style={{ flexDirection: 'row', justifyContent: 'space-around', marginBottom: 8 }}>
+                {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
+                  <Text key={d} style={{ width: 34, textAlign: 'center', fontSize: 10.5, fontWeight: '700', color: '#64748b' }}>
+                    {d}
+                  </Text>
+                ))}
+              </View>
 
-                return (
-                  <TouchableOpacity
-                    key={`c-day-${dayNum}`}
-                    onPress={() => {
-                      setCustomDateISO(isoStr);
-                      setFilterMode('custom_date');
-                      setCustomDatePickerVisible(false);
-                    }}
-                    style={{
-                      width: `${100 / 7}%`,
-                      height: 36,
-                      alignItems: 'center',
-                      justifyContent: 'center'
-                    }}
-                  >
-                    <View style={[
-                      { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
-                      isSelected && { backgroundColor: '#0284c7' },
-                      !isSelected && isToday && { borderWidth: 1.5, borderColor: '#0284c7' }
-                    ]}>
-                      <Text style={[
-                        { fontSize: 12, fontWeight: '700', color: '#0f172a' },
-                        isSelected && { color: '#ffffff', fontWeight: '800' },
-                        !isSelected && isToday && { color: '#0284c7', fontWeight: '800' }
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+                {Array.from({ length: new Date(customCalYear, customCalMonth, 1).getDay() }).map((_, i) => (
+                  <View key={`c-empty-${i}`} style={{ width: `${100 / 7}%`, height: 36 }} />
+                ))}
+                {Array.from({ length: new Date(customCalYear, customCalMonth + 1, 0).getDate() }).map((_, i) => {
+                  const dayNum = i + 1;
+                  const formattedMonth = (customCalMonth + 1) < 10 ? `0${customCalMonth + 1}` : `${customCalMonth + 1}`;
+                  const formattedDay = dayNum < 10 ? `0${dayNum}` : `${dayNum}`;
+                  const isoStr = `${customCalYear}-${formattedMonth}-${formattedDay}`;
+                  const isSelected = customDateISO === isoStr;
+                  const isToday = todayStr === isoStr;
+
+                  return (
+                    <TouchableOpacity
+                      key={`c-day-${dayNum}`}
+                      onPress={() => {
+                        setCustomDateISO(isoStr);
+                        setFilterMode('custom_date');
+                        setCustomDatePickerVisible(false);
+                      }}
+                      style={{
+                        width: `${100 / 7}%`,
+                        height: 36,
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                    >
+                      <View style={[
+                        { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
+                        isSelected && { backgroundColor: '#0284c7' },
+                        !isSelected && isToday && { borderWidth: 1.5, borderColor: '#0284c7' }
                       ]}>
-                        {dayNum}
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
-                );
-              })}
+                        <Text style={[
+                          { fontSize: 12, fontWeight: '700', color: '#0f172a' },
+                          isSelected && { color: '#ffffff', fontWeight: '800' },
+                          !isSelected && isToday && { color: '#0284c7', fontWeight: '800' }
+                        ]}>
+                          {dayNum}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <TouchableOpacity
+                onPress={() => setCustomDatePickerVisible(false)}
+                style={{ marginTop: 14, backgroundColor: '#f1f5f9', paddingVertical: 9, borderRadius: 8, alignItems: 'center' }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: '700', color: '#475569' }}>Close Calendar</Text>
+              </TouchableOpacity>
             </View>
-
-            <TouchableOpacity
-              onPress={() => setCustomDatePickerVisible(false)}
-              style={{ marginTop: 14, backgroundColor: '#f1f5f9', paddingVertical: 9, borderRadius: 8, alignItems: 'center' }}
-            >
-              <Text style={{ fontSize: 12, fontWeight: '700', color: '#475569' }}>Close Calendar</Text>
-            </TouchableOpacity>
           </View>
-        </View>
-      </Modal>
+        </Modal>
+      )}
 
       {/* ================= RESCHEDULE FOLLOW-UP MODAL ================= */}
       {rescheduleModalItem && (
@@ -2286,107 +2352,109 @@ export const FollowUpsScreen: React.FC<FollowUpsScreenProps> = ({
       )}
 
       {/* Reschedule Date Picker Sub-Modal */}
-      <Modal
-        visible={rescheduleDatePickerVisible}
-        transparent={true}
-        animationType="fade"
-        onRequestClose={() => setRescheduleDatePickerVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalCard, { maxWidth: 340, padding: 16 }]}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-              <TouchableOpacity
-                onPress={() => {
-                  if (rescheduleCalMonth === 0) {
-                    setRescheduleCalMonth(11);
-                    setRescheduleCalYear(prev => prev - 1);
-                  } else {
-                    setRescheduleCalMonth(prev => prev - 1);
-                  }
-                }}
-                style={{ padding: 6, backgroundColor: '#f1f5f9', borderRadius: 8 }}
-              >
-                <Feather name="chevron-left" size={18} color="#d97706" />
-              </TouchableOpacity>
-              <Text style={{ fontSize: 14.5, fontWeight: '800', color: '#0f172a' }}>
-                {monthNames[rescheduleCalMonth]} {rescheduleCalYear}
-              </Text>
-              <TouchableOpacity
-                onPress={() => {
-                  if (rescheduleCalMonth === 11) {
-                    setRescheduleCalMonth(0);
-                    setRescheduleCalYear(prev => prev + 1);
-                  } else {
-                    setRescheduleCalMonth(prev => prev + 1);
-                  }
-                }}
-                style={{ padding: 6, backgroundColor: '#f1f5f9', borderRadius: 8 }}
-              >
-                <Feather name="chevron-right" size={18} color="#d97706" />
-              </TouchableOpacity>
-            </View>
-
-            <View style={{ flexDirection: 'row', justifyContent: 'space-around', marginBottom: 8 }}>
-              {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
-                <Text key={d} style={{ width: 34, textAlign: 'center', fontSize: 10.5, fontWeight: '700', color: '#64748b' }}>
-                  {d}
+      {rescheduleDatePickerVisible && (
+        <Modal
+          visible={rescheduleDatePickerVisible}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => setRescheduleDatePickerVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalCard, { maxWidth: 340, padding: 16 }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                <TouchableOpacity
+                  onPress={() => {
+                    if (rescheduleCalMonth === 0) {
+                      setRescheduleCalMonth(11);
+                      setRescheduleCalYear(prev => prev - 1);
+                    } else {
+                      setRescheduleCalMonth(prev => prev - 1);
+                    }
+                  }}
+                  style={{ padding: 6, backgroundColor: '#f1f5f9', borderRadius: 8 }}
+                >
+                  <Feather name="chevron-left" size={18} color="#d97706" />
+                </TouchableOpacity>
+                <Text style={{ fontSize: 14.5, fontWeight: '800', color: '#0f172a' }}>
+                  {monthNames[rescheduleCalMonth]} {rescheduleCalYear}
                 </Text>
-              ))}
-            </View>
+                <TouchableOpacity
+                  onPress={() => {
+                    if (rescheduleCalMonth === 11) {
+                      setRescheduleCalMonth(0);
+                      setRescheduleCalYear(prev => prev + 1);
+                    } else {
+                      setRescheduleCalMonth(prev => prev + 1);
+                    }
+                  }}
+                  style={{ padding: 6, backgroundColor: '#f1f5f9', borderRadius: 8 }}
+                >
+                  <Feather name="chevron-right" size={18} color="#d97706" />
+                </TouchableOpacity>
+              </View>
 
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-              {Array.from({ length: new Date(rescheduleCalYear, rescheduleCalMonth, 1).getDay() }).map((_, i) => (
-                <View key={`r-empty-${i}`} style={{ width: `${100 / 7}%`, height: 36 }} />
-              ))}
-              {Array.from({ length: new Date(rescheduleCalYear, rescheduleCalMonth + 1, 0).getDate() }).map((_, i) => {
-                const dayNum = i + 1;
-                const formattedMonth = (rescheduleCalMonth + 1) < 10 ? `0${rescheduleCalMonth + 1}` : `${rescheduleCalMonth + 1}`;
-                const formattedDay = dayNum < 10 ? `0${dayNum}` : `${dayNum}`;
-                const isoStr = `${rescheduleCalYear}-${formattedMonth}-${formattedDay}`;
-                const isSelected = rescheduleDateISO === isoStr;
-                const isToday = todayStr === isoStr;
+              <View style={{ flexDirection: 'row', justifyContent: 'space-around', marginBottom: 8 }}>
+                {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
+                  <Text key={d} style={{ width: 34, textAlign: 'center', fontSize: 10.5, fontWeight: '700', color: '#64748b' }}>
+                    {d}
+                  </Text>
+                ))}
+              </View>
 
-                return (
-                  <TouchableOpacity
-                    key={`r-day-${dayNum}`}
-                    onPress={() => {
-                      setRescheduleDateISO(isoStr);
-                      setRescheduleDatePickerVisible(false);
-                    }}
-                    style={{
-                      width: `${100 / 7}%`,
-                      height: 36,
-                      alignItems: 'center',
-                      justifyContent: 'center'
-                    }}
-                  >
-                    <View style={[
-                      { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
-                      isSelected && { backgroundColor: '#d97706' },
-                      !isSelected && isToday && { borderWidth: 1.5, borderColor: '#d97706' }
-                    ]}>
-                      <Text style={[
-                        { fontSize: 12, fontWeight: '700', color: '#0f172a' },
-                        isSelected && { color: '#ffffff', fontWeight: '800' },
-                        !isSelected && isToday && { color: '#d97706', fontWeight: '800' }
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+                {Array.from({ length: new Date(rescheduleCalYear, rescheduleCalMonth, 1).getDay() }).map((_, i) => (
+                  <View key={`r-empty-${i}`} style={{ width: `${100 / 7}%`, height: 36 }} />
+                ))}
+                {Array.from({ length: new Date(rescheduleCalYear, rescheduleCalMonth + 1, 0).getDate() }).map((_, i) => {
+                  const dayNum = i + 1;
+                  const formattedMonth = (rescheduleCalMonth + 1) < 10 ? `0${rescheduleCalMonth + 1}` : `${rescheduleCalMonth + 1}`;
+                  const formattedDay = dayNum < 10 ? `0${dayNum}` : `${dayNum}`;
+                  const isoStr = `${rescheduleCalYear}-${formattedMonth}-${formattedDay}`;
+                  const isSelected = rescheduleDateISO === isoStr;
+                  const isToday = todayStr === isoStr;
+
+                  return (
+                    <TouchableOpacity
+                      key={`r-day-${dayNum}`}
+                      onPress={() => {
+                        setRescheduleDateISO(isoStr);
+                        setRescheduleDatePickerVisible(false);
+                      }}
+                      style={{
+                        width: `${100 / 7}%`,
+                        height: 36,
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                    >
+                      <View style={[
+                        { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
+                        isSelected && { backgroundColor: '#d97706' },
+                        !isSelected && isToday && { borderWidth: 1.5, borderColor: '#d97706' }
                       ]}>
-                        {dayNum}
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+                        <Text style={[
+                          { fontSize: 12, fontWeight: '700', color: '#0f172a' },
+                          isSelected && { color: '#ffffff', fontWeight: '800' },
+                          !isSelected && isToday && { color: '#d97706', fontWeight: '800' }
+                        ]}>
+                          {dayNum}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
 
-            <TouchableOpacity
-              onPress={() => setRescheduleDatePickerVisible(false)}
-              style={{ marginTop: 14, backgroundColor: '#f1f5f9', paddingVertical: 9, borderRadius: 8, alignItems: 'center' }}
-            >
-              <Text style={{ fontSize: 12, fontWeight: '700', color: '#475569' }}>Close Calendar</Text>
-            </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => setRescheduleDatePickerVisible(false)}
+                style={{ marginTop: 14, backgroundColor: '#f1f5f9', paddingVertical: 9, borderRadius: 8, alignItems: 'center' }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: '700', color: '#475569' }}>Close Calendar</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
-      </Modal>
+        </Modal>
+      )}
     </View>
   );
 };

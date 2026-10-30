@@ -18,6 +18,9 @@ import { EmployeeDailyWorksPage } from './EmployeeWorks/EmployeeDailyWorksPage';
 import { EmployeeAttendanceReportPage } from './EmployeeAttendance/EmployeeAttendanceReportPage';
 import { BranchCleaningPage } from './BranchCleaning/BranchCleaningPage';
 import { AdminFollowUpsPage } from './FollowUps/AdminFollowUpsPage';
+import { DeletePatientProfiles } from '../HR/DeletePatientProfiles/DeletePatientProfilesPage';
+import { TelecallerManagementPage } from './TelecallerManagement/TelecallerManagementPage';
+import { Headset } from 'lucide-react';
 import { createFeeDiscountResponseNotificationInFirestore } from '../../utils/fcmWebTrigger';
 import { receptionDataStore } from '../../utils/receptionDataStore';
 interface AdminDashboardPageProps {
@@ -35,6 +38,7 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({ currentB
     if (path.includes('leaverequest') || path.includes('leaves')) return 'leave_requests';
     if (path === 'managebanner' || path === 'managebanners' || path === 'banners') return 'banners';
     if (path === 'packagemembers' || path === 'packages') return 'package_members';
+    if (path === 'deleteprofiles' || path === 'delete-profiles' || path === 'deleteprofile') return 'delete_profiles';
     if (path === 'globalpatients' || path === 'patients') return 'patients';
     if (path.includes('average') || path.includes('arpu') || path.includes('duration')) return 'average_analytics';
     if (path === 'reports-analytics' || path === 'reports' || path === 'analytics') return 'reports_analytics';
@@ -43,12 +47,14 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({ currentB
     if (path === 'branches' || path === 'targets') return 'branches';
     if (path === 'doctortimings' || path === 'doctors') return 'doctors';
     if (path === 'staffmanagement' || path === 'staff') return 'staff';
+    if (path === 'telecaller-updates' || path === 'telecallerupdates') return 'telecaller_updates';
+    if (path === 'telecaller' || path.includes('telecaller')) return 'telecaller';
     if (path === 'medicines' || path === 'inventory') return 'medicines';
     return 'overview';
   };
 
   const [activeTab, setActiveTab] = useState<
-    'overview' | 'follow_ups' | 'fee_requests' | 'leave_requests' | 'branch_cleaning' | 'employee_attendance' | 'employee_works' | 'package_members' | 'patients' | 'banners' | 'finance' | 'reports_analytics' | 'average_analytics' | 'pending_payments' | 'branches' | 'doctors' | 'staff' | 'medicines'
+    'overview' | 'follow_ups' | 'fee_requests' | 'leave_requests' | 'branch_cleaning' | 'employee_attendance' | 'employee_works' | 'package_members' | 'patients' | 'delete_profiles' | 'banners' | 'finance' | 'reports_analytics' | 'average_analytics' | 'pending_payments' | 'branches' | 'doctors' | 'staff' | 'telecaller' | 'telecaller_updates' | 'medicines'
   >(getTabFromUrl);
 
   const [isNavCollapsed, setIsNavCollapsed] = useState(false);
@@ -94,6 +100,7 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({ currentB
       case 'leave_requests': targetPath = '/hr/leaverequests'; break;
       case 'banners': targetPath = '/managebanner'; break;
       case 'package_members': targetPath = '/packagemembers'; break;
+      case 'delete_profiles': targetPath = role === 'hr' ? '/hr/deleteprofiles' : '/deleteprofiles'; break;
       case 'patients': targetPath = '/globalpatients'; break;
       case 'reports_analytics': targetPath = '/reports-analytics'; break;
       case 'average_analytics': targetPath = '/average-analytics'; break;
@@ -102,6 +109,7 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({ currentB
       case 'branches': targetPath = '/branches'; break;
       case 'doctors': targetPath = '/doctortimings'; break;
       case 'staff': targetPath = '/staffmanagement'; break;
+      case 'telecaller_updates': targetPath = role === 'hr' ? '/hr/telecallerupdates' : '/telecallerupdates'; break;
       case 'medicines': targetPath = '/medicines'; break;
       default: targetPath = role === 'hr' ? '/hr' : '/dashboard'; break;
     }
@@ -1187,6 +1195,7 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({ currentB
     { id: 'employee_attendance', label: 'Employee Attendance Report', icon: UserCheck },
     { id: 'employee_works', label: 'Employee Daily Works', icon: FileText },
     { id: 'package_members', label: 'Package Members', icon: Package },
+    { id: 'delete_profiles', label: 'Delete Profiles (Phone)', icon: Trash2 },
     { id: 'patients', label: 'Global Patients List', icon: Users },
     { id: 'banners', label: 'Manage Banners', icon: Image },
     { id: 'reports_analytics', label: 'Reports & Analytics', icon: BarChart3 },
@@ -1195,6 +1204,8 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({ currentB
     { id: 'branches', label: 'Manage Branches & Targets', icon: Building2 },
     { id: 'doctors', label: 'Doctor Timings', icon: Clock },
     { id: 'staff', label: 'Staff Management', icon: UserCheck },
+    { id: 'telecaller', label: 'Telecaller Accounts', icon: Headset },
+    { id: 'telecaller_updates', label: 'Telecaller Updates', icon: Headset },
     { id: 'medicines', label: 'Edit Medicine Inventory', icon: Pill },
   ];
   return (
@@ -2123,6 +2134,11 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({ currentB
           <ManageBranchesPage role={role} />
         )}
 
+        {/* TAB: INDIVIDUAL PATIENT PROFILE DELETION (PHONE SEARCH) */}
+        {activeTab === 'delete_profiles' && (
+          <DeletePatientProfiles currentBranch={currentBranch} role={role} />
+        )}
+
         {/* TAB 3: GLOBAL PATIENTS & PACKAGE MEMBERS */}
         {activeTab === 'patients' && (
           <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '20px', padding: '22px' }}>
@@ -2647,6 +2663,11 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({ currentB
         {/* TAB 6: FINANCE, TOTAL & NUTRITION REVENUE */}
         {activeTab === 'finance' && (
           <AdminTotalRevenuePage liveData={adminRevenueLiveData} />
+        )}
+
+        {/* TAB: TELECALLER MANAGEMENT */}
+        {(activeTab === 'telecaller' || activeTab === 'telecaller_updates') && (
+          <TelecallerManagementPage role={role} initialTab={activeTab === 'telecaller_updates' ? 'activities' : 'accounts'} />
         )}
 
         {/* TAB 7: EDIT MEDICINE FORM */}

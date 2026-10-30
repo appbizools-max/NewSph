@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, TextInput, Alert, ScrollView, Platform, Modal, FlatList } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, TextInput, Alert, ScrollView, Platform, Modal, FlatList, BackHandler } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
@@ -61,13 +61,41 @@ export interface MobileMedicineRequestsScreenProps {
   branchName?: string;
   currentBranch?: string;
   userRole?: string;
+  onNavigate?: (tab: string, data?: any) => void;
+  onBack?: () => boolean | void;
+  isActive?: boolean;
 }
 const PREFIX_OPTIONS = ['Mr.', 'Mrs.', 'Ms.', 'Master', 'Dr.'];
 export const MobileMedicineRequestsScreen: React.FC<MobileMedicineRequestsScreenProps> = ({
   branchName,
   currentBranch,
-  userRole
+  userRole,
+  onNavigate,
+  onBack,
+  isActive = true,
 }) => {
+  // Native Android Hardware Back Navigation Handler
+  useEffect(() => {
+    if (!isActive) return;
+
+    const onHardwareBack = () => {
+      console.log('>>> [BACK_EVENT] MedicineRequestsScreen onHardwareBack called! isActive:', isActive);
+      if (onBack) {
+        const res = onBack();
+        console.log('>>> [BACK_EVENT] MedicineRequestsScreen onBack result:', res);
+        return true;
+      }
+      if (onNavigate) {
+        onNavigate('reception_dashboard');
+        return true;
+      }
+      return true;
+    };
+
+    const backSub = BackHandler.addEventListener('hardwareBackPress', onHardwareBack);
+    return () => backSub.remove();
+  }, [isActive, onBack, onNavigate]);
+
   const initialBranch = branchName || currentBranch || '';
   const [selectedBranch, setSelectedBranch] = useState(initialBranch);
   const isAdmin = userRole === 'admin' || userRole === 'hr';
@@ -876,7 +904,8 @@ export const MobileMedicineRequestsScreen: React.FC<MobileMedicineRequestsScreen
       </TouchableOpacity>
 
       {/* Duration Picker Modal */}
-      <Modal visible={showDurationPicker} transparent animationType="slide" onRequestClose={() => setShowDurationPicker(false)}>
+      {showDurationPicker && (
+        <Modal visible={showDurationPicker} transparent animationType="slide" onRequestClose={() => setShowDurationPicker(false)}>
         <TouchableOpacity style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' }} activeOpacity={1} onPress={() => setShowDurationPicker(false)}>
           <View style={{ backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '50%', paddingBottom: 30 }}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
@@ -910,9 +939,11 @@ export const MobileMedicineRequestsScreen: React.FC<MobileMedicineRequestsScreen
           </View>
         </TouchableOpacity>
       </Modal>
+      )}
 
       {/* Medicine Type Picker Modal */}
-      <Modal visible={showTypePicker} transparent animationType="slide" onRequestClose={() => setShowTypePicker(false)}>
+      {showTypePicker && (
+        <Modal visible={showTypePicker} transparent animationType="slide" onRequestClose={() => setShowTypePicker(false)}>
         <TouchableOpacity style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' }} activeOpacity={1} onPress={() => setShowTypePicker(false)}>
           <View style={{ backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '60%', paddingBottom: 30 }}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
@@ -945,9 +976,11 @@ export const MobileMedicineRequestsScreen: React.FC<MobileMedicineRequestsScreen
           </View>
         </TouchableOpacity>
       </Modal>
+      )}
 
       {/* Dosage Timing Picker Modal */}
-      <Modal visible={showTimingPicker} transparent animationType="slide" onRequestClose={() => setShowTimingPicker(false)}>
+      {showTimingPicker && (
+        <Modal visible={showTimingPicker} transparent animationType="slide" onRequestClose={() => setShowTimingPicker(false)}>
         <TouchableOpacity style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' }} activeOpacity={1} onPress={() => setShowTimingPicker(false)}>
           <View style={{ backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '60%', paddingBottom: 30 }}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' }}>
@@ -975,9 +1008,11 @@ export const MobileMedicineRequestsScreen: React.FC<MobileMedicineRequestsScreen
           </View>
         </TouchableOpacity>
       </Modal>
+      )}
 
       {/* Branch Selection Modal for Admin */}
-      <Modal visible={showBranchPicker} transparent animationType="slide" onRequestClose={() => setShowBranchPicker(false)}>
+      {showBranchPicker && (
+        <Modal visible={showBranchPicker} transparent animationType="slide" onRequestClose={() => setShowBranchPicker(false)}>
         <TouchableOpacity style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' }} activeOpacity={1} onPress={() => setShowBranchPicker(false)}>
           <View style={{ backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, maxHeight: 380 }}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -1020,6 +1055,7 @@ export const MobileMedicineRequestsScreen: React.FC<MobileMedicineRequestsScreen
           </View>
         </TouchableOpacity>
       </Modal>
+      )}
 
     </ScrollView>
   );

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Modal, View, Text, StyleSheet, TouchableOpacity,
   TextInput, ScrollView, Alert, ActivityIndicator, SafeAreaView, Linking, Image, Share, NativeModules, Platform
@@ -288,7 +288,7 @@ export interface AppointmentPaymentModalProps {
 }
 export const buildOfficialInvoiceHtml = (activeInvoice: any, patientName: string, patientPhone: string) => {
   const invCode = activeInvoice?.id ? String(activeInvoice.id).substring(0, 8).toUpperCase() : 'RECEIPT';
-  const totalAmount = Number(activeInvoice?.totalPaid || activeInvoice?.targetAmount || 2000).toFixed(2);
+  const totalAmount = Number(activeInvoice?.totalPaid || activeInvoice?.targetAmount || 0).toFixed(2);
   const docName = activeInvoice?.doctorName || activeInvoice?.doctor || 'Dr. Prashanth k vaidya';
   const branchName = activeInvoice?.branch || 'KPHB';
   const appDate = activeInvoice?.appointmentDate || activeInvoice?.date || new Date().toLocaleDateString('en-GB');
@@ -513,6 +513,49 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
   const [uploadedPrescriptionList, setUploadedPrescriptionList] = useState<string[]>([]);
   const [isUploadingPrescription, setIsUploadingPrescription] = useState<boolean>(false);
   const [previewModalUrl, setPreviewModalUrl] = useState<string | null>(null);
+  const [previewImageIndex, setPreviewImageIndex] = useState<number>(0);
+  const [previewRotation, setPreviewRotation] = useState<number>(0);
+
+  const allPaymentPrescriptionImages = useMemo(() => {
+    const list: string[] = [];
+    if (selectedPatientForPayment?.canvasPrescriptionUrl && uploadedPrescriptionList.includes(selectedPatientForPayment.canvasPrescriptionUrl)) {
+      list.push(selectedPatientForPayment.canvasPrescriptionUrl);
+    }
+    if (selectedPatientForPayment?.prescriptionUrl && uploadedPrescriptionList.includes(selectedPatientForPayment.prescriptionUrl)) {
+      list.push(selectedPatientForPayment.prescriptionUrl);
+    }
+    uploadedPrescriptionList.forEach((u) => {
+      if (u && !list.includes(u)) list.push(u);
+    });
+    return list;
+  }, [selectedPatientForPayment, uploadedPrescriptionList]);
+
+  const handleOpenPreview = (url: string) => {
+    const idx = allPaymentPrescriptionImages.indexOf(url);
+    setPreviewImageIndex(idx >= 0 ? idx : 0);
+    setPreviewModalUrl(url);
+    setPreviewRotation(0);
+  };
+
+  const handlePrevPreviewImage = () => {
+    if (allPaymentPrescriptionImages.length <= 1) return;
+    const nextIdx = previewImageIndex > 0 ? previewImageIndex - 1 : allPaymentPrescriptionImages.length - 1;
+    setPreviewImageIndex(nextIdx);
+    setPreviewModalUrl(allPaymentPrescriptionImages[nextIdx]);
+    setPreviewRotation(0);
+  };
+
+  const handleNextPreviewImage = () => {
+    if (allPaymentPrescriptionImages.length <= 1) return;
+    const nextIdx = previewImageIndex < allPaymentPrescriptionImages.length - 1 ? previewImageIndex + 1 : 0;
+    setPreviewImageIndex(nextIdx);
+    setPreviewModalUrl(allPaymentPrescriptionImages[nextIdx]);
+    setPreviewRotation(0);
+  };
+
+  const handleRotatePreviewImage = () => {
+    setPreviewRotation((prev) => (prev + 90) % 360);
+  };
 
   // Performance Guard Refs to eliminate lag and prevent duplicate Firestore collection queries
   const lastProcessedPatientIdRef = useRef<string | null>(null);
@@ -663,10 +706,27 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
   const handlePickPrescriptionFromGallery = async () => {
     if (!selectedPatientForPayment) return;
     try {
-      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!permission.granted) {
-        Alert.alert('Permission Required', 'Please allow gallery access to select prescription photos.');
-        return;
+      if (Platform.OS === 'ios') {
+        const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert(
+            'Permission Required',
+            'Please allow gallery access in Settings to select prescription photos.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Open Settings', onPress: () => Linking.openSettings() }
+            ]
+          );
+          return;
+        }
+      } else {
+        // On Android, launchImageLibraryAsync uses system PhotoPicker without requiring broad media permissions
+        try {
+          const perm = await ImagePicker.getMediaLibraryPermissionsAsync();
+          if (!perm.granted && perm.canAskAgain) {
+            await ImagePicker.requestMediaLibraryPermissionsAsync();
+          }
+        } catch (_) { }
       }
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
@@ -706,9 +766,21 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
         setUploadedPrescriptionList(prev => Array.from(new Set([...prev, ...newUrls])));
         Alert.alert('Prescription Attached ✓', 'Prescription image uploaded successfully.');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Gallery pick error:', err);
-      Alert.alert('Error', 'Could not open device photo gallery.');
+      const isPermError = err?.message?.toLowerCase()?.includes('permission') || err?.code === 'ERR_MISSING_PERMISSION';
+      if (isPermError) {
+        Alert.alert(
+          'Permission Required',
+          'Please allow photo gallery access in Settings to select prescription photos.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Open Settings', onPress: () => Linking.openSettings() }
+          ]
+        );
+      } else {
+        Alert.alert('Error', 'Could not open device photo gallery.');
+      }
     } finally {
       setIsUploadingPrescription(false);
     }
@@ -719,7 +791,14 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
     try {
       const permission = await ImagePicker.requestCameraPermissionsAsync();
       if (!permission.granted) {
-        Alert.alert('Permission Required', 'Please allow camera access to take prescription photos.');
+        Alert.alert(
+          'Permission Required',
+          'Please allow camera access in Settings to take prescription photos.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Open Settings', onPress: () => Linking.openSettings() }
+          ]
+        );
         return;
       }
       const result = await ImagePicker.launchCameraAsync({
@@ -777,20 +856,42 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
           onPress: async () => {
             const updated = uploadedPrescriptionList.filter(u => u !== urlToRemove);
             setUploadedPrescriptionList(updated);
+
+            if (selectedPatientForPayment) {
+              if (selectedPatientForPayment.canvasPrescriptionUrl === urlToRemove) {
+                selectedPatientForPayment.canvasPrescriptionUrl = '';
+              }
+              if (selectedPatientForPayment.prescriptionUrl === urlToRemove) {
+                selectedPatientForPayment.prescriptionUrl = updated[0] || '';
+              }
+              if (selectedPatientForPayment.prescriptionImage === urlToRemove) {
+                selectedPatientForPayment.prescriptionImage = updated[0] || '';
+              }
+              if (Array.isArray(selectedPatientForPayment.uploadedPrescriptions)) {
+                selectedPatientForPayment.uploadedPrescriptions = updated;
+              }
+              if (Array.isArray(selectedPatientForPayment.prescriptionUrls)) {
+                selectedPatientForPayment.prescriptionUrls = updated;
+              }
+            }
+
             const activeDb = getSafeDb();
-            if (selectedPatientForPayment?.id && activeDb) {
-              await updateDoc(doc(activeDb, 'appointments', selectedPatientForPayment.id), {
+            const targetId = selectedPatientForPayment?.id || selectedPatientForPayment?.patientDocId || selectedPatientForPayment?.patientId;
+            if (targetId && activeDb) {
+              const removalPayload: any = {
                 uploadedPrescriptions: updated,
+                prescriptionUrls: updated,
+                prescriptionUrl: updated[0] || '',
+                prescriptionImage: updated[0] || '',
                 updatedAt: new Date().toISOString()
-              }).catch(() => { });
-              await updateDoc(doc(activeDb, 'allpatients', selectedPatientForPayment.id), {
-                uploadedPrescriptions: updated,
-                updatedAt: new Date().toISOString()
-              }).catch(() => { });
-              await updateDoc(doc(activeDb, 'patients', selectedPatientForPayment.id), {
-                uploadedPrescriptions: updated,
-                updatedAt: new Date().toISOString()
-              }).catch(() => { });
+              };
+              if (selectedPatientForPayment?.canvasPrescriptionUrl === urlToRemove) {
+                removalPayload.canvasPrescriptionUrl = '';
+              }
+              receptionDataStore.updateLocalAppointment(targetId, removalPayload);
+              await updateDoc(doc(activeDb, 'appointments', targetId), removalPayload).catch(() => { });
+              await updateDoc(doc(activeDb, 'allpatients', targetId), removalPayload).catch(() => { });
+              await updateDoc(doc(activeDb, 'patients', targetId), removalPayload).catch(() => { });
             }
           }
         }
@@ -827,7 +928,7 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
     } else if (cFee > 0) {
       computedTarget = cFee;
     } else {
-      computedTarget = 1000;
+      computedTarget = 0;
     }
 
     setDietFeeInput(dFee);
@@ -869,7 +970,7 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
       setPaymentTypePreset('consultation');
       setIncludeConsultFee(true);
       setIncludeMedicineFee(false);
-      setConsultFeeInput(computedTarget > 0 ? computedTarget : 500);
+      setConsultFeeInput(computedTarget > 0 ? computedTarget : 0);
       setMedicineFeeInput(0);
       setMedicineItems([]);
     }
@@ -1378,14 +1479,14 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
   } else if (!existingActivePackage && paymentTypePreset === 'package') {
     totalAmountDue = Number(packageAdvancePaidInput) || 0;
   }
-
   // Dynamic Razorpay UPI QR Code State
+  const isRebackVisit = (selectedPatientForPayment as any)?.isReback === true || (selectedPatientForPayment as any)?.rebackVisit === true;
   const [upiQrLoading, setUpiQrLoading] = useState<boolean>(false);
   const [upiQrData, setUpiQrData] = useState<QrCodeResult | null>(null);
   const [upiQrChecking, setUpiQrChecking] = useState<boolean>(false);
   const [upiQrPaid, setUpiQrPaid] = useState<boolean>(false);
-
   const generateUpiQr = async (forceAmount?: number) => {
+    if (isRebackVisit) return;
     const amt = typeof forceAmount === 'number' ? forceAmount : totalAmountDue;
     if (amt <= 0) return;
     setUpiQrLoading(true);
@@ -1410,7 +1511,6 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
       setUpiQrLoading(false);
     }
   };
-
   const handleVerifyUpiPayment = async () => {
     if (!upiQrData?.qrId) {
       Alert.alert('Notice', 'No active payment ID to check.');
@@ -1476,7 +1576,7 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
   const splitCardAmount = isSplitCard ? ((splitMethod1 === 'Card' ? Number(splitAmount1) : Number(splitAmount2)) || 0) : 0;
 
   const generateSplitUpiQr = async (amt: number) => {
-    if (amt <= 0) return;
+    if (isRebackVisit || amt <= 0) return;
     setSplitUpiQrLoading(true);
     setSplitUpiQrPaid(false);
     try {
@@ -1501,15 +1601,16 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
   };
 
   useEffect(() => {
+    if (isRebackVisit) return;
     if (isSplitUpi && splitUpiAmount > 0) {
       if (!splitUpiQrData || splitUpiQrData.amount !== splitUpiAmount) {
         generateSplitUpiQr(splitUpiAmount);
       }
     }
-  }, [isSplitUpi, splitUpiAmount]);
+  }, [isRebackVisit, isSplitUpi, splitUpiAmount]);
 
   useEffect(() => {
-    if (!isSplitUpi || !splitUpiQrData?.qrId || splitUpiQrPaid) return;
+    if (isRebackVisit || !isSplitUpi || !splitUpiQrData?.qrId || splitUpiQrPaid) return;
     const interval = setInterval(async () => {
       try {
         const res = await checkRazorpayPaymentStatus(splitUpiQrData.qrId!);
@@ -1520,9 +1621,13 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
       } catch (_) { }
     }, 4000);
     return () => clearInterval(interval);
-  }, [isSplitUpi, splitUpiQrData?.qrId, splitUpiQrPaid]);
+  }, [isRebackVisit, isSplitUpi, splitUpiQrData?.qrId, splitUpiQrPaid]);
 
   const handleLaunchMobileCardPayment = async (targetAmt?: number) => {
+    if (isRebackVisit) {
+      Alert.alert('Historical Visit', 'This is a Reback visit. Payment collection is already completed; live card gateway is disabled.');
+      return;
+    }
     const amt = typeof targetAmt === 'number' ? targetAmt : (selectedPaymentMode === 'Card' ? totalAmountDue : splitCardAmount);
     if (amt <= 0) {
       Alert.alert('Validation Error', 'Please enter a valid amount for Card payment.');
@@ -1676,12 +1781,52 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
       finalMedicineDuration = medicineDuration;
     }
 
+    const histDate = (selectedPatientForPayment as any)?.appointmentDate || (selectedPatientForPayment as any)?.date || (selectedPatientForPayment as any)?.historicalVisitDate || null;
+
+    // Calculate effective revenue date: strictly use the booked appointment date for Reback visits
+    let effectiveRevenueDate = nowIso;
+    let effectiveRevenueDateStr = histDate || null;
+    let isCurrentMonthForRevenue = true;
+
+    if (isRebackVisit && histDate) {
+      const str = String(histDate).trim();
+      let y = 0, m = 0, d = 0;
+      if (str.includes('T')) {
+        const parsed = new Date(str);
+        if (!isNaN(parsed.getTime())) {
+          y = parsed.getFullYear();
+          m = parsed.getMonth();
+          d = parsed.getDate();
+        }
+      }
+      if (!y) {
+        const parts = str.split(/[-/]/);
+        if (parts.length === 3) {
+          if (parts[2].length === 4) {
+            d = parseInt(parts[0], 10);
+            m = parseInt(parts[1], 10) - 1;
+            y = parseInt(parts[2], 10);
+          } else if (parts[0].length === 4) {
+            y = parseInt(parts[0], 10);
+            m = parseInt(parts[1], 10) - 1;
+            d = parseInt(parts[2], 10);
+          }
+        }
+      }
+      if (y > 1970 && !isNaN(m) && !isNaN(d)) {
+        const bookedObj = new Date(y, m, d, 12, 0, 0);
+        effectiveRevenueDate = bookedObj.toISOString();
+        effectiveRevenueDateStr = `${String(d).padStart(2, '0')}-${String(m + 1).padStart(2, '0')}-${y}`;
+        isCurrentMonthForRevenue = effectiveRevenueDate.slice(0, 7) === nowIso.slice(0, 7);
+      }
+    }
+
     const payload = {
       status: 'completed',
       paymentStatus: 'paid',
       paymentPending: false,
       feeCollectionNeeded: false,
-      paymentCollectedAt: nowIso,
+      paymentCollectedAt: isRebackVisit ? effectiveRevenueDate : nowIso,
       paymentTypePreset: paymentTypePreset,
       consultationFee: isPkg ? 0 : activeConsultFee,
       medicineFee: isPkg ? 0 : activeMedicineFee,
@@ -1694,6 +1839,7 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
       targetAmount: isPkg ? totalAmountDue : targetAmount,
       totalPaid: totalAmountDue,
       paymentMode: paymentModeText,
+      paymentMethod: selectedPaymentMode === 'Counter UPI' ? 'upi' : selectedPaymentMode.toLowerCase(),
       medicines: includeMedicineFee ? medicineItems : [],
       medicineDuration: finalMedicineDuration,
       durationStartDate: computedDurationStartDate,
@@ -1722,8 +1868,41 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
         await updateDoc(doc(activeDb, 'allpatients', docId), payload).catch(() => { });
         await updateDoc(doc(activeDb, 'patients', docId), payload).catch(() => { });
 
-        // Atomically increment branch target reached in real time
+        // Record in alltransactions collection for centralized revenue sync
         if (totalAmountDue > 0) {
+          addDoc(collection(activeDb, 'alltransactions'), {
+            appointmentId: selectedPatientForPayment.id,
+            patientDocId: selectedPatientForPayment.id,
+            patientId: selectedPatientForPayment.regId || selectedPatientForPayment.registrationId || selectedPatientForPayment.patientId || selectedPatientForPayment.id,
+            patientName: patientName,
+            phone: patientPhone,
+            branchName: selectedPatientForPayment.branch || selectedPatientForPayment.branchName || 'KPHB',
+            doctorName: selectedPatientForPayment.doctorName || selectedPatientForPayment.doctor || 'Dr. Prashanth K Vaidya',
+            amount: totalAmountDue,
+            totalAmount: totalAmountDue,
+            consultationFee: isPkg ? 0 : activeConsultFee,
+            medicineFee: isPkg ? 0 : activeMedicineFee,
+            packageFee: isPkg ? totalAmountDue : 0,
+            dietFee: activeDietFee,
+            paymentMethod: selectedPaymentMode === 'Counter UPI' ? 'upi' : selectedPaymentMode.toLowerCase(),
+            paymentMode: paymentModeText,
+            revenueSplit: isPkg ? 'Package' : (activeMedicineFee > 0 ? 'Consultation & Medicine Fee' : 'Consultation'),
+            source: selectedPatientForPayment.marketingSource || selectedPatientForPayment.source || 'Walk-in',
+            status: 'PAID',
+            isReback: isRebackVisit,
+            rebackVisit: isRebackVisit,
+            historicalVisitDate: effectiveRevenueDateStr,
+            date: effectiveRevenueDateStr,
+            appointmentDate: effectiveRevenueDateStr,
+            timestamp: effectiveRevenueDate,
+            createdAt: effectiveRevenueDate,
+            paymentCollectedAt: effectiveRevenueDate,
+            actualRecordedAt: nowIso
+          }).catch(() => { });
+        }
+
+        // Atomically increment branch target reached in real time
+        if (totalAmountDue > 0 && (!isRebackVisit || isCurrentMonthForRevenue)) {
           const rawBranch = String(selectedPatientForPayment.branch || selectedPatientForPayment.branchName || 'kphb').toLowerCase();
           const bKey = rawBranch.includes('nalla') ? 'nallagandla'
             : rawBranch.includes('dilshuk') ? 'dilshuknagar'
@@ -1883,51 +2062,54 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
         console.warn('Official PDF generation notice:', printErr);
       }
 
-      // Trigger Leonas WhatsApp Invoice / Payment Receipt Notification
-      sendInvoiceWhatsAppNotification({
-        patientName: selectedPatientForPayment.patientName || selectedPatientForPayment.name || 'Patient',
-        phone: selectedPatientForPayment.phone || selectedPatientForPayment.phoneNumber || '',
-        invoiceId: selectedPatientForPayment.id,
-        totalPaid: totalAmountDue,
-        paymentMode: paymentModeText,
-        branch: selectedPatientForPayment.branch || 'KPHB',
-        doctorName: selectedPatientForPayment.doctorName || selectedPatientForPayment.doctor || selectedPatientForPayment.assignedDoctor || 'Dr. Prashanth K Vaidya',
-        items: mobileInvoiceItems,
-        pdfUrl: officialPdfUrl
-      }).then(res => {
-        const generatedPdfUrl = (res as any)?.pdfUrl || officialPdfUrl;
-        if (generatedPdfUrl && activeDb) {
-          updateDoc(doc(activeDb, 'appointments', selectedPatientForPayment.id), { invoicePdfUrl: generatedPdfUrl }).catch(() => { });
-          updateDoc(doc(activeDb, 'allpatients', selectedPatientForPayment.id), { invoicePdfUrl: generatedPdfUrl }).catch(() => { });
+      // Do NOT send external messaging, WhatsApp invoice, or SMS for historical Reback visits
+      if (!isRebackVisit) {
+        // Trigger Leonas WhatsApp Invoice / Payment Receipt Notification
+        sendInvoiceWhatsAppNotification({
+          patientName: selectedPatientForPayment.patientName || selectedPatientForPayment.name || 'Patient',
+          phone: selectedPatientForPayment.phone || selectedPatientForPayment.phoneNumber || '',
+          invoiceId: selectedPatientForPayment.id,
+          totalPaid: totalAmountDue,
+          paymentMode: paymentModeText,
+          branch: selectedPatientForPayment.branch || 'KPHB',
+          doctorName: selectedPatientForPayment.doctorName || selectedPatientForPayment.doctor || selectedPatientForPayment.assignedDoctor || 'Dr. Prashanth K Vaidya',
+          items: mobileInvoiceItems,
+          pdfUrl: officialPdfUrl
+        }).then(res => {
+          const generatedPdfUrl = (res as any)?.pdfUrl || officialPdfUrl;
+          if (generatedPdfUrl && activeDb) {
+            updateDoc(doc(activeDb, 'appointments', selectedPatientForPayment.id), { invoicePdfUrl: generatedPdfUrl }).catch(() => { });
+            updateDoc(doc(activeDb, 'allpatients', selectedPatientForPayment.id), { invoicePdfUrl: generatedPdfUrl }).catch(() => { });
+          }
+        }).catch(err => console.error('WhatsApp invoice notification error:', err));
+
+        // Trigger SMS Payment Receipt (DLT Template)
+        const payPatientPhone = selectedPatientForPayment.phone || selectedPatientForPayment.phoneNumber || '';
+        const payPatientName = selectedPatientForPayment.patientName || selectedPatientForPayment.name || 'Patient';
+        const payReceiptNo = selectedPatientForPayment.id ? String(selectedPatientForPayment.id).substring(0, 8).toUpperCase() : ('RCP-' + Math.random().toString(36).substring(2, 8).toUpperCase());
+        const payBranch = selectedPatientForPayment.branch || 'KPHB';
+
+        if (payPatientPhone) {
+          sendPaymentReceiptSMS(
+            payPatientPhone,
+            payPatientName,
+            totalAmountDue,
+            payReceiptNo,
+            new Date().toLocaleDateString('en-GB'),
+            payBranch
+          ).catch(err => console.warn('SMS payment receipt notification notice:', err));
         }
-      }).catch(err => console.error('WhatsApp invoice notification error:', err));
 
-      // Trigger SMS Payment Receipt (DLT Template)
-      const payPatientPhone = selectedPatientForPayment.phone || selectedPatientForPayment.phoneNumber || '';
-      const payPatientName = selectedPatientForPayment.patientName || selectedPatientForPayment.name || 'Patient';
-      const payReceiptNo = selectedPatientForPayment.id ? String(selectedPatientForPayment.id).substring(0, 8).toUpperCase() : ('RCP-' + Math.random().toString(36).substring(2, 8).toUpperCase());
-      const payBranch = selectedPatientForPayment.branch || 'KPHB';
-
-      if (payPatientPhone) {
-        sendPaymentReceiptSMS(
-          payPatientPhone,
-          payPatientName,
-          totalAmountDue,
-          payReceiptNo,
-          new Date().toLocaleDateString('en-GB'),
-          payBranch
-        ).catch(err => console.warn('SMS payment receipt notification notice:', err));
+        // Trigger Payment Notification in Firestore for HR (all branches) & Branch Reception
+        createPaymentNotificationInFirestore({
+          patientName: selectedPatientForPayment.patientName || selectedPatientForPayment.name || 'Patient',
+          amount: totalAmountDue,
+          branch: selectedPatientForPayment.branch || 'KPHB',
+          paymentMode: paymentModeText,
+          doctorName: selectedPatientForPayment.doctorName || selectedPatientForPayment.doctor || selectedPatientForPayment.assignedDoctor || 'Dr. Prashanth K Vaidya',
+          invoiceId: selectedPatientForPayment.id,
+        }).catch(err => console.error('Payment notification error:', err));
       }
-
-      // Trigger Payment Notification in Firestore for HR (all branches) & Branch Reception
-      createPaymentNotificationInFirestore({
-        patientName: selectedPatientForPayment.patientName || selectedPatientForPayment.name || 'Patient',
-        amount: totalAmountDue,
-        branch: selectedPatientForPayment.branch || 'KPHB',
-        paymentMode: paymentModeText,
-        doctorName: selectedPatientForPayment.doctorName || selectedPatientForPayment.doctor || selectedPatientForPayment.assignedDoctor || 'Dr. Prashanth K Vaidya',
-        invoiceId: selectedPatientForPayment.id,
-      }).catch(err => console.error('Payment notification error:', err));
 
       if (onPaymentSuccess) {
         onPaymentSuccess(completedInvoice);
@@ -2122,7 +2304,7 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
                 <View>
                   <Text style={{ fontSize: 10, fontWeight: '800', color: '#166534' }}>TOTAL AMOUNT PAID</Text>
                   <Text style={{ fontSize: 28, fontWeight: '900', color: '#15803d', marginTop: 2 }}>
-                    ₹{Number(activeInvoice.totalPaid || activeInvoice.targetAmount || 2000).toFixed(2)}
+                    ₹{Number(activeInvoice.totalPaid || activeInvoice.targetAmount || 0).toFixed(2)}
                   </Text>
                 </View>
 
@@ -2398,7 +2580,7 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
                     <div class="pay-box">
                       <div>
                         <div class="label" style="color: #166534;">TOTAL AMOUNT PAID</div>
-                        <div class="pay-amt">₹${Number(activeInvoice?.totalPaid || activeInvoice?.targetAmount || 2000).toFixed(2)}</div>
+                        <div class="pay-amt">₹${Number(activeInvoice?.totalPaid || activeInvoice?.targetAmount || 0).toFixed(2)}</div>
                       </div>
                       <div style="text-align: right;">
                         <span class="paid-badge">PAID ✓</span>
@@ -2621,7 +2803,7 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
                       >
                         <TouchableOpacity
                           activeOpacity={0.85}
-                          onPress={() => setPreviewModalUrl(url)}
+                          onPress={() => handleOpenPreview(url)}
                           style={{ width: '100%', height: '100%' }}
                         >
                           <Image
@@ -3572,7 +3754,7 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
               </Text>
             )}
             <View style={styles.paymentMethodGrid}>
-              {['Cash', 'UPI / QR Code', 'Card', 'Split', 'Send Pay to app'].map((mode) => {
+              {['Cash', 'Counter UPI', 'UPI / QR Code', 'Card', 'Split', 'Send Pay to app'].map((mode) => {
                 const isActive = selectedPaymentMode === mode;
                 return (
                   <TouchableOpacity
@@ -3596,8 +3778,60 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
               })}
             </View>
 
+            {/* Clinic Counter UPI Standee Section (Direct Manual Verification) */}
+            {selectedPaymentMode === 'Counter UPI' && totalAmountDue > 0 && (
+              <View style={{
+                marginTop: 6,
+                marginBottom: 12,
+                backgroundColor: '#f0fdf4',
+                borderRadius: 12,
+                borderWidth: 1.5,
+                borderColor: '#86efac',
+                padding: 14
+              }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Ionicons name="checkmark-circle" size={18} color="#16a34a" />
+                    <Text style={{ fontSize: 13, fontWeight: '800', color: '#166534' }}>Counter UPI (Reception Standee)</Text>
+                  </View>
+                  <View style={{ backgroundColor: '#dcfce7', paddingHorizontal: 7, paddingVertical: 2, borderRadius: 6, borderWidth: 1, borderColor: '#bbf7d0' }}>
+                    <Text style={{ fontSize: 10, fontWeight: '800', color: '#15803d' }}>MANUAL CHECK</Text>
+                  </View>
+                </View>
+                <Text style={{ fontSize: 12, color: '#14532d', lineHeight: 17 }}>
+                  Patient will scan the clinic's physical QR standee / soundbox at reception for <Text style={{ fontWeight: '800' }}>₹{totalAmountDue.toLocaleString('en-IN')}</Text>. Once you verify confirmation on the counter device or phone, tap <Text style={{ fontWeight: '800' }}>Confirm Payment & Generate Invoice ✓</Text> below to complete the appointment.
+                </Text>
+              </View>
+            )}
+
+            {/* Reback Historical Payment Notice */}
+            {isRebackVisit && totalAmountDue > 0 && (
+              <View style={{
+                marginTop: 6,
+                marginBottom: 12,
+                backgroundColor: '#eff6ff',
+                borderRadius: 12,
+                borderWidth: 1.5,
+                borderColor: '#93c5fd',
+                padding: 14
+              }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Ionicons name="time-outline" size={18} color="#2563eb" />
+                    <Text style={{ fontSize: 13, fontWeight: '800', color: '#1e40af' }}>Historical Collection Entry (Reback)</Text>
+                  </View>
+                  <View style={{ backgroundColor: '#dbeafe', paddingHorizontal: 7, paddingVertical: 2, borderRadius: 6, borderWidth: 1, borderColor: '#bfdbfe' }}>
+                    <Text style={{ fontSize: 10, fontWeight: '800', color: '#1d4ed8' }}>ALREADY COLLECTED</Text>
+                  </View>
+                </View>
+                <Text style={{ fontSize: 12, color: '#1e3a8a', lineHeight: 17 }}>
+                  This historical visit payment was already collected on the visit date for <Text style={{ fontWeight: '800' }}>₹{totalAmountDue.toLocaleString('en-IN')}</Text>. Tap <Text style={{ fontWeight: '800' }}>Confirm Payment & Generate Invoice ✓</Text> below to record the transaction log without re-charging or sending messages.
+                </Text>
+              </View>
+            )}
+
             {/* Dynamic Razorpay UPI QR Code Section */}
-            {selectedPaymentMode === 'UPI / QR Code' && totalAmountDue > 0 && (
+            {selectedPaymentMode === 'UPI / QR Code' && totalAmountDue > 0 && !isRebackVisit && (
               <View style={styles.upiQrContainer}>
                 <View style={styles.upiQrHeader}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -3749,20 +3983,22 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
                     Accept all Visa, MasterCard, RuPay & Amex cards via secure Razorpay checkout
                   </Text>
 
-                  <TouchableOpacity
-                    onPress={() => handleLaunchMobileCardPayment(totalAmountDue)}
-                    disabled={cardIsProcessing}
-                    style={[styles.upiPrimaryBtn, { backgroundColor: '#16a34a', width: '100%', paddingVertical: 11 }]}
-                  >
-                    {cardIsProcessing ? (
-                      <ActivityIndicator size="small" color="#ffffff" />
-                    ) : (
-                      <>
-                        <Ionicons name="card-outline" size={16} color="#ffffff" />
-                        <Text style={styles.upiPrimaryBtnText}>Pay ₹{totalAmountDue.toLocaleString('en-IN')} via Card</Text>
-                      </>
-                    )}
-                  </TouchableOpacity>
+                  {!isRebackVisit && (
+                    <TouchableOpacity
+                      onPress={() => handleLaunchMobileCardPayment(totalAmountDue)}
+                      disabled={cardIsProcessing}
+                      style={[styles.upiPrimaryBtn, { backgroundColor: '#16a34a', width: '100%', paddingVertical: 11 }]}
+                    >
+                      {cardIsProcessing ? (
+                        <ActivityIndicator size="small" color="#ffffff" />
+                      ) : (
+                        <>
+                          <Ionicons name="card-outline" size={16} color="#ffffff" />
+                          <Text style={styles.upiPrimaryBtnText}>Pay ₹{totalAmountDue.toLocaleString('en-IN')} via Card</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  )}
 
                   {/* Manual POS Slip Entry */}
                   <View style={{ width: '100%', marginTop: 14, paddingTop: 10, borderTopWidth: 1, borderTopColor: '#e2e8f0' }}>
@@ -4424,36 +4660,169 @@ export const AppointmentPaymentModal: React.FC<AppointmentPaymentModalProps> = (
           visible={!!previewModalUrl}
           transparent={true}
           animationType="fade"
-          onRequestClose={() => setPreviewModalUrl(null)}
+          onRequestClose={() => { setPreviewModalUrl(null); setPreviewRotation(0); }}
         >
           <View style={{
             flex: 1,
-            backgroundColor: 'rgba(0, 0, 0, 0.92)',
+            backgroundColor: 'rgba(0, 0, 0, 0.95)',
             justifyContent: 'center',
             alignItems: 'center',
-            padding: 16,
           }}>
-            <TouchableOpacity
-              onPress={() => setPreviewModalUrl(null)}
-              style={{
-                position: 'absolute',
-                top: 40,
-                right: 20,
-                backgroundColor: 'rgba(255, 255, 255, 0.25)',
-                width: 40,
-                height: 40,
-                borderRadius: 20,
+            {/* Top Navigation & Action Bar */}
+            <SafeAreaView style={{
+              position: 'absolute',
+              top: Platform.OS === 'android' ? 14 : 0,
+              left: 0,
+              right: 0,
+              zIndex: 30,
+            }}>
+              <View style={{
+                flexDirection: 'row',
                 alignItems: 'center',
-                justifyContent: 'center',
-                zIndex: 10,
-              }}
-            >
-              <Ionicons name="close" size={26} color="#ffffff" />
-            </TouchableOpacity>
-            <Image
-              source={{ uri: previewModalUrl }}
-              style={{ width: '100%', height: '80%', resizeMode: 'contain', borderRadius: 8 }}
-            />
+                justifyContent: 'space-between',
+                paddingHorizontal: 16,
+                paddingVertical: 10,
+              }}>
+                {/* Image Counter Badge */}
+                <View style={{
+                  backgroundColor: 'rgba(255, 255, 255, 0.22)',
+                  paddingHorizontal: 12,
+                  paddingVertical: 6,
+                  borderRadius: 16,
+                  borderWidth: 1,
+                  borderColor: 'rgba(255, 255, 255, 0.3)',
+                }}>
+                  <Text style={{ color: '#ffffff', fontSize: 13, fontWeight: '800' }}>
+                    {allPaymentPrescriptionImages.length > 0
+                      ? `${previewImageIndex + 1} / ${allPaymentPrescriptionImages.length}`
+                      : '1 / 1'}
+                  </Text>
+                </View>
+
+                {/* Right Actions: Rotate Button + Close Button */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  <TouchableOpacity
+                    onPress={handleRotatePreviewImage}
+                    activeOpacity={0.8}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 6,
+                      backgroundColor: 'rgba(255, 255, 255, 0.25)',
+                      paddingHorizontal: 14,
+                      paddingVertical: 8,
+                      borderRadius: 20,
+                      borderWidth: 1,
+                      borderColor: 'rgba(255, 255, 255, 0.35)',
+                    }}
+                  >
+                    <Ionicons name="reload" size={17} color="#ffffff" />
+                    <Text style={{ color: '#ffffff', fontSize: 12.5, fontWeight: '800' }}>
+                      Rotate ({previewRotation}°)
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    onPress={() => { setPreviewModalUrl(null); setPreviewRotation(0); }}
+                    activeOpacity={0.8}
+                    style={{
+                      backgroundColor: 'rgba(239, 68, 68, 0.9)',
+                      width: 38,
+                      height: 38,
+                      borderRadius: 19,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      shadowColor: '#000',
+                      shadowOffset: { width: 0, height: 2 },
+                      shadowOpacity: 0.3,
+                      shadowRadius: 3,
+                      elevation: 4,
+                    }}
+                  >
+                    <Ionicons name="close" size={24} color="#ffffff" />
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </SafeAreaView>
+
+            {/* Central Image Container */}
+            <View style={{
+              width: '100%',
+              height: '75%',
+              justifyContent: 'center',
+              alignItems: 'center',
+              paddingHorizontal: 20,
+            }}>
+              <Image
+                source={{ uri: previewModalUrl }}
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  resizeMode: 'contain',
+                  transform: [{ rotate: `${previewRotation}deg` }],
+                }}
+              />
+            </View>
+
+            {/* Left Side Arrow Button < */}
+            {allPaymentPrescriptionImages.length > 1 && (
+              <TouchableOpacity
+                onPress={handlePrevPreviewImage}
+                activeOpacity={0.8}
+                style={{
+                  position: 'absolute',
+                  left: 14,
+                  top: '50%',
+                  transform: [{ translateY: -26 }],
+                  backgroundColor: 'rgba(15, 23, 42, 0.75)',
+                  width: 52,
+                  height: 52,
+                  borderRadius: 26,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  zIndex: 25,
+                  borderWidth: 1.5,
+                  borderColor: 'rgba(255, 255, 255, 0.5)',
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.4,
+                  shadowRadius: 4,
+                  elevation: 6,
+                }}
+              >
+                <Ionicons name="chevron-back" size={32} color="#ffffff" />
+              </TouchableOpacity>
+            )}
+
+            {/* Right Side Arrow Button > */}
+            {allPaymentPrescriptionImages.length > 1 && (
+              <TouchableOpacity
+                onPress={handleNextPreviewImage}
+                activeOpacity={0.8}
+                style={{
+                  position: 'absolute',
+                  right: 14,
+                  top: '50%',
+                  transform: [{ translateY: -26 }],
+                  backgroundColor: 'rgba(15, 23, 42, 0.75)',
+                  width: 52,
+                  height: 52,
+                  borderRadius: 26,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  zIndex: 25,
+                  borderWidth: 1.5,
+                  borderColor: 'rgba(255, 255, 255, 0.5)',
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.4,
+                  shadowRadius: 4,
+                  elevation: 6,
+                }}
+              >
+                <Ionicons name="chevron-forward" size={32} color="#ffffff" />
+              </TouchableOpacity>
+            )}
           </View>
         </Modal>
       )}

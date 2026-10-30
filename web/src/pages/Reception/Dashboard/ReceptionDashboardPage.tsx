@@ -11,7 +11,7 @@ import { PatientFileUI } from '../../../components/PatientFileUI';
 import { CollectFeeCheckoutModal } from '../../../components/CollectFeeCheckoutModal';
 import { getPatientVisitState } from '../../../utils/patientVisitState';
 import { receptionDataStore } from '../../../utils/receptionDataStore';
-import { calculateRealBranchRevenue, syncBranchTargetToFirestore } from '../../../utils/branchRevenueCalculator';
+import { calculateRealBranchRevenue, syncBranchTargetToFirestore, reconcileBranchTargetData, normalizeBranchKey, getCanonicalBranchName } from '../../../utils/branchRevenueCalculator';
 interface ReceptionDashboardPageProps {
   currentBranch?: string;
   branchId?: CanonicalBranchId;
@@ -177,114 +177,42 @@ export const ReceptionDashboardPage: React.FC<ReceptionDashboardPageProps> = ({
     return () => window.removeEventListener('click', handleGlobalClick);
   }, []);
 
-  const DEFAULT_BRANCH_TARGETS: Record<string, { monthlyTarget: number; targetReached: number }> = {
-    kphb: { monthlyTarget: 725000, targetReached: 0 },
-    nallagandla: { monthlyTarget: 325000, targetReached: 0 },
-    dilshuknagar: { monthlyTarget: 225000, targetReached: 0 },
-    chandanagar: { monthlyTarget: 550000, targetReached: 0 },
-  };
+  const activeBranchKey = normalizeBranchKey(currentBranch || 'KPHB Branch');
+  const activeBranchName = getCanonicalBranchName(activeBranchKey);
 
-  const getBranchDefaultTarget = (bName: string) => {
-    const norm = String(bName || '').toLowerCase();
-    if (norm.includes('nalla') || norm.includes('nallagandla')) return DEFAULT_BRANCH_TARGETS.nallagandla;
-    if (norm.includes('dilshuk') || norm.includes('dilsukh') || norm.includes('dsnr') || norm.includes('dshnr')) return DEFAULT_BRANCH_TARGETS.dilshuknagar;
-    if (norm.includes('chanda') || norm.includes('chnr') || norm.includes('chandanagar')) return DEFAULT_BRANCH_TARGETS.chandanagar;
-    return DEFAULT_BRANCH_TARGETS.kphb;
-  };
-
-  const activeBranchName = currentBranch || 'KPHB Branch';
-  const initialTarget = getBranchDefaultTarget(activeBranchName);
-
-  // Subscribe live to Firestore branchTargets
+  // Authoritative live subscription to Firestore branchTargets
   const [branchTarget, setBranchTarget] = useState({
-    monthlyTarget: initialTarget.monthlyTarget,
+    monthlyTarget: 0,
     targetReached: 0,
     branchName: activeBranchName
   });
 
   useEffect(() => {
-    // Ensure base target configuration exists in Firestore branchTargets without overwriting revenue
-    const branchesToSync = [
-      { id: 'kphb', name: 'KPHB Branch', monthlyTarget: 725000 },
-      { id: 'chandanagar', name: 'Chandanagar Branch', monthlyTarget: 550000 },
-      { id: 'nallagandla', name: 'Nallagandla Branch', monthlyTarget: 325000 },
-      { id: 'dilshuknagar', name: 'Dilshuknagar Branch', monthlyTarget: 225000 }
-    ];
-    branchesToSync.forEach(async (b) => {
-      try {
-        const docRef = doc(db, 'branchTargets', b.id);
-        const snap = await getDoc(docRef);
-        if (!snap.exists()) {
-          await setDoc(docRef, {
-            id: b.id,
-            branchId: b.id,
-            branchName: b.name,
-            monthlyTarget: b.monthlyTarget,
-            targetReached: 0,
-            remaining: b.monthlyTarget,
-            percentage: 0,
-            updatedAt: new Date().toISOString()
-          }, { merge: true });
-        }
-      } catch (err) {
-        console.warn(`Authoritative branch target sync notice for ${b.id}:`, err);
-      }
-    });
-
     try {
       const colRef = collection(db, 'branchTargets');
       const unsubscribe = onSnapshot(colRef, (snapshot) => {
-        const curBranch = currentBranch || 'KPHB Branch';
-        const defTarget = getBranchDefaultTarget(curBranch);
+        const curBranchKey = normalizeBranchKey(currentBranch || 'KPHB Branch');
+        const canonName = getCanonicalBranchName(curBranchKey);
 
         if (!snapshot.empty) {
           const liveMap: Record<string, any> = {};
           snapshot.forEach((docSnap) => {
             liveMap[docSnap.id.toLowerCase()] = docSnap.data();
-            if (docSnap.data().branchName) {
-              liveMap[docSnap.data().branchName.toLowerCase()] = docSnap.data();
-            }
           });
 
-          const activeBranchKey = curBranch.toLowerCase().replace(/\s*branch$/i, '').trim();
+          const targetData = liveMap[curBranchKey] || liveMap[`${curBranchKey} branch`];
+          const reconciled = reconcileBranchTargetData(targetData, curBranchKey);
 
-          const getShortcut = (str: string) => {
-            if (str.includes('kphb') || str.includes('kukatpally')) return 'kphb';
-            if (str.includes('nalla') || str.includes('nallagandla')) return 'nallagandla';
-            if (str.includes('chanda') || str.includes('chnr') || str.includes('chandanagar')) return 'chandanagar';
-            if (str.includes('dilshuk') || str.includes('dilsukh') || str.includes('dsnr') || str.includes('dshnr')) return 'dilshuknagar';
-            return str;
-          };
-
-          const keyShortcut = getShortcut(activeBranchKey);
-
-          let targetData = liveMap[activeBranchKey] || liveMap[`${activeBranchKey} branch`] || liveMap[keyShortcut] || liveMap[`${keyShortcut} branch`];
-
-          if (!targetData) {
-            const foundKey = Object.keys(liveMap).find(k => getShortcut(k) === keyShortcut);
-            if (foundKey) targetData = liveMap[foundKey];
-          }
-
-          if (targetData) {
-            const effectiveReached = Number(targetData.targetReached) || 0;
-            const effectiveTarget = Number(targetData.monthlyTarget) || defTarget.monthlyTarget;
-            setBranchTarget({
-              monthlyTarget: effectiveTarget,
-              targetReached: effectiveReached,
-              branchName: targetData.branchName || curBranch
-            });
-          } else {
-            setBranchTarget({
-              monthlyTarget: defTarget.monthlyTarget,
-              targetReached: defTarget.targetReached,
-              branchName: curBranch
-            });
-          }
+          setBranchTarget({
+            monthlyTarget: reconciled.monthlyTarget,
+            targetReached: reconciled.targetReached,
+            branchName: canonName
+          });
         } else {
           setBranchTarget({
-            monthlyTarget: defTarget.monthlyTarget,
-            targetReached: defTarget.targetReached,
-            branchName: curBranch
+            monthlyTarget: 0,
+            targetReached: 0,
+            branchName: canonName
           });
         }
       });
@@ -388,8 +316,8 @@ export const ReceptionDashboardPage: React.FC<ReceptionDashboardPageProps> = ({
           const rawBranch = String(targetApp.branch || targetApp.branchName || currentBranch || 'kphb').toLowerCase();
           const bKey = rawBranch.includes('nalla') ? 'nallagandla'
             : rawBranch.includes('dilshuk') ? 'dilshuknagar'
-            : rawBranch.includes('chanda') ? 'chandanagar'
-            : 'kphb';
+              : rawBranch.includes('chanda') ? 'chandanagar'
+                : 'kphb';
 
           updateDoc(doc(db, 'branchTargets', bKey), {
             targetReached: increment(totalPaid),
@@ -409,8 +337,8 @@ export const ReceptionDashboardPage: React.FC<ReceptionDashboardPageProps> = ({
         }).then(res => {
           const generatedPdfUrl = (res as any)?.pdfUrl;
           if (generatedPdfUrl && db) {
-            updateDoc(doc(db, 'appointments', appId), { invoicePdfUrl: generatedPdfUrl }).catch(() => {});
-            updateDoc(doc(db, 'allpatients', appId), { invoicePdfUrl: generatedPdfUrl }).catch(() => {});
+            updateDoc(doc(db, 'appointments', appId), { invoicePdfUrl: generatedPdfUrl }).catch(() => { });
+            updateDoc(doc(db, 'allpatients', appId), { invoicePdfUrl: generatedPdfUrl }).catch(() => { });
           }
         }).catch(err => console.error('WhatsApp invoice flow error:', err));
       }
@@ -454,8 +382,8 @@ export const ReceptionDashboardPage: React.FC<ReceptionDashboardPageProps> = ({
           }).then(res => {
             const generatedPdfUrl = (res as any)?.pdfUrl;
             if (generatedPdfUrl && db) {
-              updateDoc(doc(db, 'appointments', appId), { invoicePdfUrl: generatedPdfUrl }).catch(() => {});
-              updateDoc(doc(db, 'allpatients', appId), { invoicePdfUrl: generatedPdfUrl }).catch(() => {});
+              updateDoc(doc(db, 'appointments', appId), { invoicePdfUrl: generatedPdfUrl }).catch(() => { });
+              updateDoc(doc(db, 'allpatients', appId), { invoicePdfUrl: generatedPdfUrl }).catch(() => { });
             }
           }).catch(err => console.error('WhatsApp invoice error on mark as paid:', err));
         }
@@ -588,7 +516,7 @@ export const ReceptionDashboardPage: React.FC<ReceptionDashboardPageProps> = ({
         const pd = String(parsed.getDate()).padStart(2, '0');
         if (`${py}-${pm}-${pd}` === selectedDate) return true;
       }
-    } catch (_) {}
+    } catch (_) { }
 
     return false;
   };
@@ -637,6 +565,8 @@ export const ReceptionDashboardPage: React.FC<ReceptionDashboardPageProps> = ({
 
   // Filter lists for 3 sections (Selected Date & Branch ONLY)
   const upcomingList = filteredBranchDateAppointments.filter(a => {
+    // Reback appointments represent past historical visits and must NEVER appear in Upcoming Appointments
+    if (a.isReback === true || a.rebackVisit === true) return false;
     const st = (a.status || 'scheduled').toLowerCase().trim();
     const p = (a.paymentStatus || '').toLowerCase().trim();
     const isFeeNeeded = st === 'collect_fee' || a.feeCollectionNeeded === true;
@@ -795,7 +725,7 @@ export const ReceptionDashboardPage: React.FC<ReceptionDashboardPageProps> = ({
         <TargetProgressWebUI
           branchName={branchTarget.branchName || (currentBranch || 'KPHB Branch')}
           monthlyTarget={branchTarget.monthlyTarget || 0}
-          targetReached={branchTarget.targetReached || 0}
+          targetReached={Math.max(branchTarget.targetReached || 0, realBranchResult.targetReached || 0)}
         />
       </div>
 

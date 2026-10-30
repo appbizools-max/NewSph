@@ -10,7 +10,7 @@ import { TargetProgressUI } from '../../../components/TargetProgressUI';
 import { AppointmentPaymentModal } from '../../../components/AppointmentPaymentModal';
 import { getPatientVisitState, isAppAppointment } from '../../../utils/patientVisitState';
 import { receptionDataStore } from '../../../utils/receptionDataStore';
-import { calculateRealBranchRevenue, syncBranchTargetToFirestore } from '../../../utils/branchRevenueCalculator';
+import { calculateRealBranchRevenue, syncBranchTargetToFirestore, reconcileBranchTargetData, normalizeBranchKey, getCanonicalBranchName } from '../../../utils/branchRevenueCalculator';
 
 export const DASHBOARD_BRANCH_OPTIONS = [
   'All Branches',
@@ -38,20 +38,6 @@ interface ReceptionDashboardScreenProps {
   onClearInitialCheckout?: () => void;
 }
 
-const DEFAULT_BRANCH_TARGETS: Record<string, { monthlyTarget: number; targetReached: number }> = {
-  kphb: { monthlyTarget: 725000, targetReached: 0 },
-  nallagandla: { monthlyTarget: 325000, targetReached: 0 },
-  dilshuknagar: { monthlyTarget: 225000, targetReached: 0 },
-  chandanagar: { monthlyTarget: 550000, targetReached: 0 },
-};
-
-const getBranchDefaultTarget = (bName: string) => {
-  const norm = String(bName || '').toLowerCase();
-  if (norm.includes('nalla') || norm.includes('nallagandla')) return DEFAULT_BRANCH_TARGETS.nallagandla;
-  if (norm.includes('dilshuk') || norm.includes('dilsukh') || norm.includes('dsnr') || norm.includes('dshnr')) return DEFAULT_BRANCH_TARGETS.dilshuknagar;
-  if (norm.includes('chanda') || norm.includes('chnr') || norm.includes('chandanagar')) return DEFAULT_BRANCH_TARGETS.chandanagar;
-  return DEFAULT_BRANCH_TARGETS.kphb;
-};
 
 const getTodayDateStr = () => {
   const today = new Date();
@@ -595,112 +581,46 @@ export const ReceptionDashboardScreen: React.FC<ReceptionDashboardScreenProps> =
     }
   }, [currentBranch]);
 
-  const activeBranchName = selectedDashboardBranch === 'All Branches' ? 'KPHB Branch' : selectedDashboardBranch;
-  const initialTarget = getBranchDefaultTarget(activeBranchName);
+  const activeBranchKey = normalizeBranchKey(selectedDashboardBranch === 'All Branches' ? (currentBranch || 'KPHB Branch') : selectedDashboardBranch);
+  const activeBranchName = getCanonicalBranchName(activeBranchKey);
 
   const [branchTarget, setBranchTarget] = useState({
-    monthlyTarget: initialTarget.monthlyTarget,
-    targetReached: initialTarget.targetReached,
+    monthlyTarget: 0,
+    targetReached: 0,
     branchName: activeBranchName
   });
-
-  useEffect(() => {
-    const effBranch = selectedDashboardBranch === 'All Branches' ? 'KPHB Branch' : selectedDashboardBranch;
-    const def = getBranchDefaultTarget(effBranch);
-    setBranchTarget({
-      monthlyTarget: def.monthlyTarget,
-      targetReached: def.targetReached,
-      branchName: effBranch
-    });
-  }, [selectedDashboardBranch]);
 
   // Subscribe to real-time Firestore branch targets collection
   useEffect(() => {
     const activeDb = getSafeDb();
     if (!activeDb) return;
 
-    // Ensure base target configuration exists in Firestore branchTargets without overwriting revenue
-    const branchesToSync = [
-      { id: 'kphb', name: 'KPHB Branch', monthlyTarget: 725000 },
-      { id: 'chandanagar', name: 'Chandanagar Branch', monthlyTarget: 550000 },
-      { id: 'nallagandla', name: 'Nallagandla Branch', monthlyTarget: 325000 },
-      { id: 'dilshuknagar', name: 'Dilshuknagar Branch', monthlyTarget: 225000 }
-    ];
-    branchesToSync.forEach(async (b) => {
-      try {
-        const docRef = doc(activeDb, 'branchTargets', b.id);
-        const snap = await getDoc(docRef);
-        if (!snap.exists()) {
-          await setDoc(docRef, {
-            id: b.id,
-            branchId: b.id,
-            branchName: b.name,
-            monthlyTarget: b.monthlyTarget,
-            targetReached: 0,
-            remaining: b.monthlyTarget,
-            percentage: 0,
-            updatedAt: new Date().toISOString()
-          }, { merge: true });
-        }
-      } catch (err) {
-        console.warn(`Authoritative branch target sync notice for ${b.id}:`, err);
-      }
-    });
-
     try {
       const colRef = collection(activeDb, 'branchTargets');
       const unsubscribe = onSnapshot(colRef, (snapshot) => {
         const curBranch = selectedDashboardBranch === 'All Branches' ? (currentBranch || 'KPHB Branch') : selectedDashboardBranch;
-        const defTarget = getBranchDefaultTarget(curBranch);
+        const curKey = normalizeBranchKey(curBranch);
+        const canonName = getCanonicalBranchName(curKey);
 
         if (!snapshot.empty) {
           const liveMap: Record<string, any> = {};
           snapshot.forEach((docSnap) => {
             liveMap[docSnap.id.toLowerCase()] = docSnap.data();
-            if (docSnap.data().branchName) {
-              liveMap[docSnap.data().branchName.toLowerCase()] = docSnap.data();
-            }
           });
 
-          const activeBranchKey = curBranch.toLowerCase().replace(/\s*branch$/i, '').trim();
+          const targetData = liveMap[curKey] || liveMap[`${curKey} branch`];
+          const reconciled = reconcileBranchTargetData(targetData, curKey);
 
-          const getShortcut = (str: string) => {
-            if (str.includes('kphb') || str.includes('kukatpally')) return 'kphb';
-            if (str.includes('nalla') || str.includes('nallagandla')) return 'nallagandla';
-            if (str.includes('chanda') || str.includes('chnr') || str.includes('chandanagar')) return 'chandanagar';
-            if (str.includes('dilshuk') || str.includes('dilsukh') || str.includes('dsnr') || str.includes('dshnr')) return 'dilshuknagar';
-            return str;
-          };
-
-          const keyShortcut = getShortcut(activeBranchKey);
-
-          let targetData = liveMap[activeBranchKey] || liveMap[`${activeBranchKey} branch`] || liveMap[keyShortcut] || liveMap[`${keyShortcut} branch`];
-
-          if (!targetData) {
-            const foundKey = Object.keys(liveMap).find(k => getShortcut(k) === keyShortcut);
-            if (foundKey) targetData = liveMap[foundKey];
-          }
-
-          if (targetData) {
-            const effectiveReached = Number(targetData.targetReached) || 0;
-            const effectiveTarget = Number(targetData.monthlyTarget) || defTarget.monthlyTarget;
-            setBranchTarget({
-              monthlyTarget: effectiveTarget,
-              targetReached: effectiveReached,
-              branchName: targetData.branchName || curBranch
-            });
-          } else {
-            setBranchTarget({
-              monthlyTarget: defTarget.monthlyTarget,
-              targetReached: defTarget.targetReached,
-              branchName: curBranch
-            });
-          }
+          setBranchTarget({
+            monthlyTarget: reconciled.monthlyTarget,
+            targetReached: reconciled.targetReached,
+            branchName: canonName
+          });
         } else {
           setBranchTarget({
-            monthlyTarget: defTarget.monthlyTarget,
-            targetReached: defTarget.targetReached,
-            branchName: curBranch
+            monthlyTarget: 0,
+            targetReached: 0,
+            branchName: canonName
           });
         }
       });
@@ -1054,6 +974,8 @@ export const ReceptionDashboardScreen: React.FC<ReceptionDashboardScreenProps> =
   const upcomingList = useMemo(() => {
     return mappedAppointments
       .filter(app => {
+        // Reback appointments represent past historical visits and must NEVER appear in Upcoming Appointments
+        if (app.isReback === true || app.rebackVisit === true) return false;
         const s = String(app.status || '').toLowerCase().trim();
         const isFeeNeeded = s === 'collect_fee' || app.feeCollectionNeeded === true;
         const isCompleted = !isFeeNeeded && (s === 'completed' || s === 'done' || s === 'concluded');
@@ -1197,7 +1119,7 @@ export const ReceptionDashboardScreen: React.FC<ReceptionDashboardScreenProps> =
         <TargetProgressUI
           branchName={branchTarget.branchName || (selectedDashboardBranch === 'All Branches' ? (currentBranch || 'KPHB Branch') : selectedDashboardBranch)}
           monthlyTarget={branchTarget.monthlyTarget || 0}
-          targetReached={branchTarget.targetReached || 0}
+          targetReached={Math.max(branchTarget.targetReached || 0, realBranchResult.targetReached || 0)}
         />
       </View>
 

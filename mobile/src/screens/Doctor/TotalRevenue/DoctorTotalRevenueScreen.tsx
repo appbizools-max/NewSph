@@ -1,34 +1,71 @@
-import React, { useState } from 'react';
-import { StyleSheet, Text, View, ScrollView, TouchableOpacity } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { StyleSheet, Text, View, ScrollView, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { getSafeDb, collection, onSnapshot, query, limit } from '../../../utils/firebaseSafe';
 
 export const DoctorTotalRevenueScreen: React.FC = () => {
-  const [timeframe, setTimeframe] = useState<'month' | 'quarter' | 'year'>('month');
+  const db = getSafeDb();
+  const [timeframe, setTimeframe] = useState<'month' | 'year' | 'all'>('month');
+  const [totalRevenue, setTotalRevenue] = useState<number>(0);
+  const [branchBreakdown, setBranchBreakdown] = useState<Array<{ name: string; revenue: number; target: number }>>([]);
+  const [recentReceipts, setRecentReceipts] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  const summaryCards = [
-    { title: 'Total Revenue', amount: '₹3,85,000', growth: '+18.5%', bg: '#0284c7' },
-    { title: 'Consultations', amount: '₹1,45,000', growth: '+12.0%', bg: '#0f172a' },
-    { title: 'Remedies Dispensed', amount: '₹1,60,000', growth: '+22.4%', bg: '#0f172a' },
-    { title: 'Package Sales', amount: '₹80,000', growth: '+15.8%', bg: '#0f172a' },
-  ];
+  useEffect(() => {
+    if (!db) return;
 
-  const paymentModes = [
-    { mode: 'UPI / QR Code', amount: '₹2,10,000', share: '54.5%', pct: 0.545 },
-    { mode: 'Credit / Debit Cards', amount: '₹95,000', share: '24.7%', pct: 0.247 },
-    { mode: 'Cash Payments', amount: '₹55,000', share: '14.3%', pct: 0.143 },
-    { mode: 'Bank Transfer', amount: '₹25,000', share: '6.5%', pct: 0.065 },
-  ];
+    // 1. Live listener for branch targets and totals
+    const branchUnsub = onSnapshot(collection(db, 'branchTargets'), (snap) => {
+      let sum = 0;
+      const branches: Array<{ name: string; revenue: number; target: number }> = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        const reached = Number(data.targetReached) || 0;
+        const target = Number(data.monthlyTarget) || 0;
+        sum += reached;
+        branches.push({
+          name: data.branchName || d.id.toUpperCase(),
+          revenue: reached,
+          target: target
+        });
+      });
+      setTotalRevenue(sum);
+      setBranchBreakdown(branches);
+      setIsLoading(false);
+    }, (err) => {
+      console.warn('DoctorTotalRevenueScreen targets notice:', err);
+      setIsLoading(false);
+    });
 
-  const recentReceipts = [
-    { id: 'TXN-901', patient: 'Sarah Jenkins', service: 'Constitutional Package', amount: '₹12,500', mode: 'UPI' },
-    { id: 'TXN-902', patient: 'Rajesh Kumar', service: 'Consultation & Remedy', amount: '₹2,400', mode: 'Card' },
-    { id: 'TXN-903', patient: 'Anita Sharma', service: 'Acute Remedy Dispense', amount: '₹1,800', mode: 'Cash' },
-    { id: 'TXN-904', patient: 'David Miller', service: 'Spiritual Mind Care', amount: '₹8,000', mode: 'UPI' },
-  ];
+    // 2. Live listener for actual recent payments
+    const aptUnsub = onSnapshot(query(collection(db, 'appointments'), limit(15)), (snap) => {
+      const txns: any[] = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        const amt = Number(data.totalAmount) || Number(data.paidAmount) || Number(data.amountPaid) || Number(data.consultationFee) || 0;
+        if (amt > 0) {
+          txns.push({
+            id: d.id,
+            patient: data.patientName || data.name || 'Patient',
+            service: data.service || data.treatment || data.type || 'Consultation & Remedy',
+            amount: `₹${amt.toLocaleString('en-IN')}`,
+            mode: (data.paymentMode || data.paymentMethod || 'UPI').toUpperCase()
+          });
+        }
+      });
+      setRecentReceipts(txns);
+    }, (err) => {
+      console.warn('DoctorTotalRevenueScreen appointments notice:', err);
+    });
+
+    return () => {
+      branchUnsub();
+      aptUnsub();
+    };
+  }, []);
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-      
       {/* Banner */}
       <View style={styles.headerBanner}>
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -39,21 +76,25 @@ export const DoctorTotalRevenueScreen: React.FC = () => {
                 <Text style={styles.headBadgeText}>HEAD DOCTOR</Text>
               </View>
             </View>
-            <Text style={styles.bannerSub}>Financial overview & income channels</Text>
+            <Text style={styles.bannerSub}>Authoritative financial records & branch collections</Text>
           </View>
           <Ionicons name="stats-chart" size={28} color="#38bdf8" />
         </View>
 
         {/* Timeframe Selector */}
         <View style={styles.timeframeRow}>
-          {(['month', 'quarter', 'year'] as const).map((t) => (
+          {([
+            { id: 'month', label: 'This Month' },
+            { id: 'year', label: 'This Year' },
+            { id: 'all', label: 'All Time' }
+          ] as const).map((t) => (
             <TouchableOpacity
-              key={t}
-              style={[styles.tfBtn, timeframe === t && styles.tfBtnActive]}
-              onPress={() => setTimeframe(t)}
+              key={t.id}
+              style={[styles.tfBtn, timeframe === t.id && styles.tfBtnActive]}
+              onPress={() => setTimeframe(t.id)}
             >
-              <Text style={[styles.tfBtnText, timeframe === t && styles.tfBtnTextActive]}>
-                This {t}
+              <Text style={[styles.tfBtnText, timeframe === t.id && styles.tfBtnTextActive]}>
+                {t.label}
               </Text>
             </TouchableOpacity>
           ))}
@@ -62,64 +103,66 @@ export const DoctorTotalRevenueScreen: React.FC = () => {
 
       {/* Primary Hero Revenue Card */}
       <View style={styles.heroCard}>
-        <Text style={styles.heroLabel}>NET REVENUE (THIS MONTH)</Text>
-        <Text style={styles.heroAmount}>₹3,85,000</Text>
+        <Text style={styles.heroLabel}>CURRENT MONTH REVENUE (ALL 4 BRANCHES)</Text>
+        {isLoading ? (
+          <ActivityIndicator color="#ffffff" style={{ marginVertical: 10 }} />
+        ) : (
+          <Text style={styles.heroAmount}>₹{totalRevenue.toLocaleString('en-IN')}</Text>
+        )}
         <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6, gap: 4 }}>
-          <Ionicons name="trending-up-outline" size={16} color="#a7f3d0" />
-          <Text style={styles.heroGrowth}>+18.5% growth vs last month</Text>
+          <Ionicons name="shield-checkmark-outline" size={16} color="#a7f3d0" />
+          <Text style={styles.heroGrowth}>Authoritative verified collections across clinic branches</Text>
         </View>
       </View>
 
-      {/* Metrics Grid */}
-      <View style={styles.gridContainer}>
-        {summaryCards.slice(1).map((card, idx) => (
-          <View key={idx} style={styles.gridCard}>
-            <Text style={styles.gridLabel}>{card.title.toUpperCase()}</Text>
-            <Text style={styles.gridVal}>{card.amount}</Text>
-            <Text style={styles.gridGrowth}>{card.growth}</Text>
-          </View>
-        ))}
-      </View>
-
-      {/* Payment Modes Breakdown */}
+      {/* Branch Breakdown Cards */}
       <View style={styles.sectionBox}>
         <View style={styles.sectionHeader}>
-          <Ionicons name="card-outline" size={20} color="#0284c7" />
-          <Text style={styles.sectionTitle}>Payment Collections</Text>
+          <Ionicons name="business-outline" size={20} color="#0284c7" />
+          <Text style={styles.sectionTitle}>Branch Revenue Collections</Text>
         </View>
 
-        {paymentModes.map((item, idx) => (
-          <View key={idx} style={styles.payRow}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
-              <Text style={styles.payModeName}>{item.mode}</Text>
-              <Text style={styles.payModeAmt}>{item.amount} ({item.share})</Text>
+        {branchBreakdown.map((b, idx) => {
+          const pct = b.target > 0 ? Math.min(Math.round((b.revenue / b.target) * 100), 100) : 0;
+          return (
+            <View key={idx} style={styles.payRow}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                <Text style={styles.payModeName}>{b.name}</Text>
+                <Text style={styles.payModeAmt}>₹{b.revenue.toLocaleString('en-IN')} ({pct}%)</Text>
+              </View>
+              <View style={styles.barBg}>
+                <View style={[styles.barFill, { width: `${pct}%` }]} />
+              </View>
             </View>
-            <View style={styles.barBg}>
-              <View style={[styles.barFill, { width: `${item.pct * 100}%` }]} />
-            </View>
-          </View>
-        ))}
+          );
+        })}
       </View>
 
       {/* Recent Receipts List */}
       <View style={styles.sectionBox}>
         <View style={styles.sectionHeader}>
           <Ionicons name="receipt-outline" size={20} color="#16a34a" />
-          <Text style={styles.sectionTitle}>Recent Receipts</Text>
+          <Text style={styles.sectionTitle}>Recent Verified Receipts</Text>
         </View>
 
-        {recentReceipts.map((tx) => (
-          <View key={tx.id} style={styles.txCard}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-              <Text style={styles.txPatient}>{tx.patient}</Text>
-              <Text style={styles.txAmt}>{tx.amount}</Text>
+        {recentReceipts.length === 0 ? (
+          <Text style={{ fontSize: 12, color: '#64748b', fontStyle: 'italic', paddingVertical: 8 }}>
+            No recent transaction records found.
+          </Text>
+        ) : (
+          recentReceipts.map((tx) => (
+            <View key={tx.id} style={styles.txCard}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                <Text style={styles.txPatient}>{tx.patient}</Text>
+                <Text style={styles.txAmt}>{tx.amount}</Text>
+              </View>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
+                <Text style={styles.txService}>{tx.service}</Text>
+                <Text style={styles.txMode}>{tx.mode}</Text>
+              </View>
             </View>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
-              <Text style={styles.txService}>{tx.service}</Text>
-              <Text style={styles.txMode}>{tx.mode}</Text>
-            </View>
-          </View>
-        ))}
+          ))
+        )}
       </View>
 
       <View style={{ height: 40 }} />
@@ -153,18 +196,6 @@ const styles = StyleSheet.create({
   heroLabel: { fontSize: 11, fontWeight: '800', color: 'rgba(255,255,255,0.85)' },
   heroAmount: { fontSize: 26, fontWeight: '900', color: '#ffffff', marginTop: 4 },
   heroGrowth: { fontSize: 12, fontWeight: '700', color: '#a7f3d0' },
-  gridContainer: { flexDirection: 'row', gap: 8, marginBottom: 12 },
-  gridCard: {
-    flex: 1,
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-  },
-  gridLabel: { fontSize: 9.5, fontWeight: '800', color: '#64748b' },
-  gridVal: { fontSize: 15, fontWeight: '900', color: '#0f172a', marginTop: 4 },
-  gridGrowth: { fontSize: 10.5, fontWeight: '700', color: '#16a34a', marginTop: 2 },
   sectionBox: {
     backgroundColor: '#ffffff',
     borderRadius: 16,

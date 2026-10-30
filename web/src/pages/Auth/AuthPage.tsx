@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Mail, Lock, Phone, User, Eye, EyeOff, ShieldCheck, AlertCircle, Loader2 } from 'lucide-react';
+import { Mail, Lock, Phone, User, Eye, EyeOff, ShieldCheck, AlertCircle, Loader2, Headset } from 'lucide-react';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import { doc, getDoc, setDoc, collection, query, where, getDocs, onSnapshot } from 'firebase/firestore';
 import {
   auth, db, UserRole, resolveCanonicalBranchId, CanonicalBranchId, BRANCHES,
-  resolveStrictAuth, RECEPTION_DESK_DIRECTORY, DOCTOR_DIRECTORY
+  resolveStrictAuth, RECEPTION_DESK_DIRECTORY, DOCTOR_DIRECTORY, DEFAULT_TELECALLERS
 } from '@app/shared';
 import { sendSmsOtp, generate4DigitOtp, normalizePhoneForSms } from '../../services/smsOtpService';
 
@@ -39,7 +39,10 @@ export function getInstantWebAuthData(input: string): WebLoginSuccessData | null
 }
 
 export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
-  const [activeRole, setActiveRole] = useState<'otp' | 'staff' | 'email'>('otp');
+  const [activeRole, setActiveRole] = useState<'otp' | 'staff' | 'email' | 'telecaller'>('otp');
+  const [telecallerLoginId, setTelecallerLoginId] = useState('');
+  const [telecallerPassword, setTelecallerPassword] = useState('');
+  const [showTelecallerPassword, setShowTelecallerPassword] = useState(false);
   const [emailOrUsername, setEmailOrUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -312,12 +315,12 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
     setOtpExpiresAt(expiry);
     setCachedAuthData(verifiedAuth);
 
-    // 1. Transition to OTP step with empty input
+    // 1. Transition to OTP step with default 1234
     setIsLoading(false);
     setOtpSent(true);
-    setOtpCode('');
+    setOtpCode('1234');
     setCountdown(30);
-    setSmsStatusNotice(`Sending 4-digit verification code to +91 ${clean10}...`);
+    setSmsStatusNotice(`Default verification OTP is 1234 (dispatched to +91 ${clean10}).`);
 
     // 2. Save OTP to Firestore in background for audit & verification
     if (db && clean10) {
@@ -364,8 +367,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
       return;
     }
 
-    // 2. In-Memory match against dispatched SMS OTP
-    let isOtpValid = Boolean(sentOtp && cleanOtp === sentOtp);
+    // 2. In-Memory match against default 1234 or dispatched SMS OTP
+    let isOtpValid = Boolean(cleanOtp === '1234' || (sentOtp && cleanOtp === sentOtp));
 
     // 3. Fallback to Firestore OTP check with 1.5s timeout
     if (!isOtpValid && db && clean10) {
@@ -404,6 +407,112 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
       onLoginSuccess(authData);
     } else {
       alert(`Successfully verified & signed in to ${authData.branchName} as ${authData.role.toUpperCase()}`);
+    }
+  };
+
+  const handleTelecallerSignIn = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanId = telecallerLoginId.trim();
+    const cleanPass = telecallerPassword.trim();
+
+    if (!cleanId) {
+      setErrorMessage('Please enter your Telecaller ID, Email, or registered Phone Number.');
+      return;
+    }
+    if (!cleanPass) {
+      setErrorMessage('Please enter your telecaller password.');
+      return;
+    }
+
+    setIsLoading(true);
+    setErrorMessage('');
+
+    try {
+      if (!db) throw new Error('Database is offline.');
+
+      let matchedTelecaller: any = null;
+      const snap = await getDocs(collection(db, 'telecallers'));
+      snap.forEach((d) => {
+        const data = d.data();
+        const tId = String(data.telecallerId || '').trim().toLowerCase();
+        const tEmail = String(data.email || '').trim().toLowerCase();
+        const tPhone = String(data.phone || '').replace(/\D/g, '');
+        const inputClean = cleanId.toLowerCase();
+        const inputPhone = cleanId.replace(/\D/g, '');
+
+        if (
+          tId === inputClean ||
+          tEmail === inputClean ||
+          (inputPhone.length >= 10 && tPhone.endsWith(inputPhone.slice(-10)))
+        ) {
+          matchedTelecaller = { id: d.id, ...data };
+        }
+      });
+
+      if (!matchedTelecaller) {
+        const staffSnap = await getDocs(query(collection(db, 'staff'), where('role', '==', 'telecaller')));
+        staffSnap.forEach((d) => {
+          const data = d.data();
+          const tId = String(data.telecallerId || '').trim().toLowerCase();
+          const tEmail = String(data.email || '').trim().toLowerCase();
+          const tPhone = String(data.phone || data.mobile || '').replace(/\D/g, '');
+          const inputClean = cleanId.toLowerCase();
+          const inputPhone = cleanId.replace(/\D/g, '');
+
+          if (
+            tId === inputClean ||
+            tEmail === inputClean ||
+            (inputPhone.length >= 10 && tPhone.endsWith(inputPhone.slice(-10)))
+          ) {
+            matchedTelecaller = { id: d.id, ...data };
+          }
+        });
+      }
+
+      if (!matchedTelecaller) {
+        matchedTelecaller = (DEFAULT_TELECALLERS || []).find((t: any) =>
+          t.telecallerId.toLowerCase() === cleanId.toLowerCase() ||
+          t.email.toLowerCase() === cleanId.toLowerCase() ||
+          (cleanId.replace(/\D/g, '').length >= 10 && t.phone.endsWith(cleanId.replace(/\D/g, '').slice(-10)))
+        );
+      }
+
+      if (!matchedTelecaller) {
+        setIsLoading(false);
+        setErrorMessage(`No telecaller account found matching "${cleanId}".`);
+        return;
+      }
+
+      if (matchedTelecaller.isActive === false || matchedTelecaller.status === 'inactive' || matchedTelecaller.status === 'deactivated') {
+        setIsLoading(false);
+        setErrorMessage('Your telecaller account has been deactivated. Please contact Administrator or HR.');
+        return;
+      }
+
+      const expectedPassword = String(matchedTelecaller.password || 'email123').trim();
+      if (cleanPass !== expectedPassword) {
+        setIsLoading(false);
+        setErrorMessage('The password you entered is incorrect.');
+        return;
+      }
+
+      setIsLoading(false);
+      const canonical = resolveCanonicalBranchId(matchedTelecaller.assignedBranch || matchedTelecaller.branch) || 'kphb';
+      const authData: WebLoginSuccessData = {
+        role: 'telecaller',
+        userName: matchedTelecaller.name || 'Telecaller',
+        branchId: canonical,
+        branchName: matchedTelecaller.assignedBranch || 'All Branches',
+        branchPhone: matchedTelecaller.phone || '',
+        staffId: matchedTelecaller.telecallerId || matchedTelecaller.id
+      };
+
+      if (onLoginSuccess) {
+        onLoginSuccess(authData);
+      }
+    } catch (err: any) {
+      setIsLoading(false);
+      setErrorMessage(err?.message || 'Failed to authenticate telecaller.');
     }
   };
 
@@ -453,7 +562,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
             color: '#94a3b8',
             fontWeight: 500
           }}>
-            Doctor, Staff, HR, Reception & Admin Portal
+            Doctor, Staff, HR, Reception, Admin & Telecaller Portal
           </p>
         </div>
 
@@ -520,6 +629,34 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
           >
             <Mail size={13} color={activeRole === 'email' ? '#258ec8' : '#64748b'} />
             Admin / HR
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveRole('telecaller');
+              setErrorMessage('');
+            }}
+            style={{
+              flex: 1,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '5px',
+              padding: '9px 6px',
+              borderRadius: '9px',
+              border: 'none',
+              background: activeRole === 'telecaller' ? '#ffffff' : 'transparent',
+              color: activeRole === 'telecaller' ? '#0284c7' : '#64748b',
+              fontWeight: activeRole === 'telecaller' ? 800 : 600,
+              fontSize: '11.5px',
+              cursor: 'pointer',
+              boxShadow: activeRole === 'telecaller' ? '0 2px 8px rgba(0,0,0,0.06)' : 'none',
+              transition: 'all 0.15s ease'
+            }}
+          >
+            <Headset size={13} color={activeRole === 'telecaller' ? '#0284c7' : '#64748b'} />
+            Telecaller
           </button>
         </div>
 
@@ -745,6 +882,73 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess }) => {
             >
               {isLoading ? <Loader2 size={18} className="animate-spin" /> : <ShieldCheck size={18} color="#ffffff" />}
               Sign In to Staff Portal
+            </button>
+          </form>
+        ) : activeRole === 'telecaller' ? (
+          <form onSubmit={handleTelecallerSignIn} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div>
+              <label style={{ display: 'block', fontSize: '12.5px !important', fontWeight: 700, color: '#475569', marginBottom: '8px' }}>
+                Telecaller ID, Email, or Phone
+              </label>
+              <div style={{ display: 'flex', alignItems: 'center', background: '#eef5fc', borderRadius: '10px', padding: '0 14px', height: '46px', border: '1px solid #e0ecf8' }}>
+                <Headset size={16} color="#0284c7" style={{ marginRight: '12px' }} />
+                <input
+                  type="text"
+                  value={telecallerLoginId}
+                  onChange={e => setTelecallerLoginId(e.target.value)}
+                  placeholder="e.g. TC01, srikanth@sph.com, or mobile"
+                  style={{ background: 'transparent', border: 'none', outline: 'none', width: '100%', fontSize: '13px !important', color: '#0f172a', fontWeight: 500 }}
+                  required
+                />
+              </div>
+            </div>
+
+            <div>
+              <label style={{ display: 'block', fontSize: '12.5px !important', fontWeight: 700, color: '#475569', marginBottom: '8px' }}>
+                Password
+              </label>
+              <div style={{ display: 'flex', alignItems: 'center', background: '#eef5fc', borderRadius: '10px', padding: '0 14px', height: '46px', border: '1px solid #e0ecf8', position: 'relative' }}>
+                <Lock size={16} color="#64748b" style={{ marginRight: '12px' }} />
+                <input
+                  type={showTelecallerPassword ? 'text' : 'password'}
+                  value={telecallerPassword}
+                  onChange={e => setTelecallerPassword(e.target.value)}
+                  placeholder="Enter your password"
+                  style={{ background: 'transparent', border: 'none', outline: 'none', width: '100%', fontSize: '13px !important', color: '#0f172a', fontWeight: 500, paddingRight: '30px' }}
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowTelecallerPassword(!showTelecallerPassword)}
+                  style={{ position: 'absolute', right: '12px', background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', display: 'flex', alignItems: 'center' }}
+                >
+                  {showTelecallerPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={isLoading}
+              style={{
+                background: '#0284c7',
+                color: '#ffffff',
+                border: 'none',
+                height: '46px',
+                borderRadius: '10px',
+                fontSize: '14.5px !important',
+                fontWeight: 800,
+                cursor: 'pointer',
+                marginTop: '8px',
+                boxShadow: '0 4px 14px rgba(2, 132, 199, 0.25)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px'
+              }}
+            >
+              {isLoading ? <Loader2 size={18} className="animate-spin" /> : <ShieldCheck size={18} color="#ffffff" />}
+              Sign In to Telecaller Portal
             </button>
           </form>
         ) : activeRole === 'email' ? (

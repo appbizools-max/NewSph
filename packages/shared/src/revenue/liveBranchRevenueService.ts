@@ -175,36 +175,49 @@ export function startLiveBranchRevenueSync(db: Firestore | null | undefined): ()
         chandanagar: 0
       };
 
-      const seenTxnIds = new Set<string>();
       const seenAppointmentIds = new Set<string>();
+      const seenTxnIds = new Set<string>();
       const seenPatientIds = new Set<string>();
-      const seenPhoneDates = new Set<string>();
-      const seenRegDates = new Set<string>();
 
-      // 1. 📑 alltransactions (Primary Revenue Source)
+      // 1. 📅 appointments (Authoritative Clinic Collections)
+      for (const apt of appointmentDocs) {
+        if (!apt) continue;
+        const rawDate = apt.paymentCollectedAt || apt.appointmentDate || apt.date || apt.createdAt || apt.updatedAt;
+        const ymd = normalizeToYMD(rawDate);
+        const resolvedRegId = extractCleanRegId(apt);
+
+        const consultationFee =
+          extractCleanNum(apt.totalPaid) ||
+          extractCleanNum(apt.totalAmount) ||
+          extractCleanNum(apt.amountPaid) ||
+          extractCleanNum(apt.paidAmount) ||
+          extractCleanNum(apt.amount) ||
+          extractCleanNum(apt.collectFee) ||
+          extractCleanNum(apt.paymentAmount) ||
+          (extractCleanNum(apt.consultationFee) + extractCleanNum(apt.medicineFee || apt.pharmacyFee) + extractCleanNum(apt.packageFee || apt.packageAdvancePaid));
+
+        const paymentStatus = String(apt.paymentStatus || apt.status || '').toLowerCase();
+        const isPaid = paymentStatus === 'paid' || paymentStatus === 'confirmed' || paymentStatus === 'completed' || paymentStatus === 'done' || consultationFee > 0;
+
+        if (apt.id) seenAppointmentIds.add(String(apt.id));
+
+        if (consultationFee > 0 && isPaid && ymd && ymd.startsWith(currentMonthPrefix)) {
+          const bKey = normalizeBranchKey(apt.branchName || apt.branch || apt.targetBranch, resolvedRegId);
+          branchRevenue[bKey] += consultationFee;
+        }
+      }
+
+      // 2. 📑 alltransactions (Add standalone payments not attached to already counted appointments)
       for (const item of allTxnDocs) {
         if (!item) continue;
         const rawDate = item.timestamp || item.date || item.createdAt;
         const ymd = normalizeToYMD(rawDate);
-        const phone = String(item.phoneNumber || item.phone || item.mobile || '').replace(/\D/g, '').slice(-10);
-
-        let resolvedRegId = extractCleanRegId(item);
-        if (!resolvedRegId) {
-          if (item.patientId && patientRegIdMap.has(item.patientId)) resolvedRegId = patientRegIdMap.get(item.patientId)!;
-          else if (item.patientDocId && patientRegIdMap.has(item.patientDocId)) resolvedRegId = patientRegIdMap.get(item.patientDocId)!;
-          else if (phone && patientRegIdMap.has(phone)) resolvedRegId = patientRegIdMap.get(phone)!;
-          else if (item.appointmentId && patientRegIdMap.has(String(item.appointmentId))) resolvedRegId = patientRegIdMap.get(String(item.appointmentId))!;
-          else if (item.patientName && patientRegIdMap.has(String(item.patientName).toLowerCase().trim())) resolvedRegId = patientRegIdMap.get(String(item.patientName).toLowerCase().trim())!;
-        }
-
-        const regIdKey = (resolvedRegId || '').toLowerCase().trim();
+        const resolvedRegId = extractCleanRegId(item);
 
         if (item.id) seenTxnIds.add(String(item.id));
-        if (item.appointmentId) seenAppointmentIds.add(String(item.appointmentId));
-        if (item.patientDocId) seenPatientIds.add(String(item.patientDocId));
-        if (regIdKey) seenPatientIds.add(regIdKey);
-        if (phone && ymd) seenPhoneDates.add(`${phone}_${ymd}`);
-        if (regIdKey && ymd) seenRegDates.add(`${regIdKey}_${ymd}`);
+        if (item.appointmentId && seenAppointmentIds.has(String(item.appointmentId))) {
+          continue; // Already counted from appointments
+        }
 
         const itemsConsultation = extractCleanNum(item.itemsPaid?.consultation);
         const itemsMedicine = extractCleanNum(item.itemsPaid?.medicine);
@@ -227,79 +240,20 @@ export function startLiveBranchRevenueSync(db: Firestore | null | undefined): ()
         }
       }
 
-      // 2. 👤 allpatients (Patient Direct Billing & Dues where not in alltransactions)
+      // 3. 👤 allpatients (Patient Direct Billing where not in appointments or transactions)
       for (const p of allPatientDocs) {
         if (!p) continue;
+        if (p.id && (seenAppointmentIds.has(p.id) || seenTxnIds.has(p.id) || seenPatientIds.has(p.id))) continue;
+        if (p.id) seenPatientIds.add(p.id);
+
         const rawDate = p.paymentCollectedAt || p.createdAt || p.date;
         const ymd = normalizeToYMD(rawDate);
-        const phone = String(p.phoneNumber || p.phone || p.mobile || '').replace(/\D/g, '').slice(-10);
-
-        let resolvedRegId = extractCleanRegId(p);
-        if (!resolvedRegId) {
-          if (phone && patientRegIdMap.has(phone)) resolvedRegId = patientRegIdMap.get(phone)!;
-          else if (p.id && patientRegIdMap.has(p.id)) resolvedRegId = patientRegIdMap.get(p.id)!;
-        }
-
-        const regIdKey = (resolvedRegId || '').toLowerCase().trim();
-
-        const inTransactions =
-          (p.id && (seenTxnIds.has(p.id) || seenPatientIds.has(p.id))) ||
-          (phone && ymd && seenPhoneDates.has(`${phone}_${ymd}`)) ||
-          (regIdKey && ymd && seenRegDates.has(`${regIdKey}_${ymd}`));
-
-        if (inTransactions) continue;
+        const resolvedRegId = extractCleanRegId(p);
 
         const amountPaid = extractCleanNum(p.amountPaid) || extractCleanNum(p.totalPaid) || extractCleanNum(p.paidAmount);
         if (amountPaid > 0 && ymd && ymd.startsWith(currentMonthPrefix)) {
           const bKey = normalizeBranchKey(p.branchName || p.branch, resolvedRegId);
           branchRevenue[bKey] += amountPaid;
-          if (phone && ymd) seenPhoneDates.add(`${phone}_${ymd}`);
-          if (regIdKey && ymd) seenRegDates.add(`${regIdKey}_${ymd}`);
-        }
-      }
-
-      // 3. 📅 appointments (Consultation Booking Collections where not in alltransactions)
-      for (const apt of appointmentDocs) {
-        if (!apt) continue;
-        const rawDate = apt.appointmentDate || apt.date || apt.createdAt;
-        const ymd = normalizeToYMD(rawDate);
-        const phone = String(apt.phoneNumber || apt.phone || apt.mobile || '').replace(/\D/g, '').slice(-10);
-
-        let resolvedRegId = extractCleanRegId(apt);
-        if (!resolvedRegId) {
-          if (phone && patientRegIdMap.has(phone)) resolvedRegId = patientRegIdMap.get(phone)!;
-          else if (apt.id && patientRegIdMap.has(apt.id)) resolvedRegId = patientRegIdMap.get(apt.id)!;
-        }
-
-        const regIdKey = (resolvedRegId || '').toLowerCase().trim();
-
-        const inTransactions =
-          (apt.id && (seenTxnIds.has(apt.id) || seenAppointmentIds.has(apt.id))) ||
-          (phone && ymd && seenPhoneDates.has(`${phone}_${ymd}`)) ||
-          (regIdKey && ymd && seenRegDates.has(`${regIdKey}_${ymd}`));
-
-        if (inTransactions) continue;
-
-        const consultationFee =
-          extractCleanNum(apt.totalAmount) ||
-          extractCleanNum(apt.amountPaid) ||
-          extractCleanNum(apt.totalPaid) ||
-          extractCleanNum(apt.paidAmount) ||
-          extractCleanNum(apt.consultationFee) ||
-          extractCleanNum(apt.fee) ||
-          extractCleanNum(apt.amount) ||
-          extractCleanNum(apt.collectFee) ||
-          extractCleanNum(apt.paymentAmount) ||
-          (extractCleanNum(apt.consultationFee) + extractCleanNum(apt.medicineFee) + extractCleanNum(apt.pharmacyFee));
-
-        const paymentStatus = String(apt.paymentStatus || apt.status || '').toLowerCase();
-        const isPaid = paymentStatus === 'paid' || paymentStatus === 'confirmed' || paymentStatus === 'completed' || consultationFee > 0;
-
-        if (consultationFee > 0 && isPaid && ymd && ymd.startsWith(currentMonthPrefix)) {
-          const bKey = normalizeBranchKey(apt.branchName || apt.branch, resolvedRegId);
-          branchRevenue[bKey] += consultationFee;
-          if (phone && ymd) seenPhoneDates.add(`${phone}_${ymd}`);
-          if (regIdKey && ymd) seenRegDates.add(`${regIdKey}_${ymd}`);
         }
       }
 
@@ -319,6 +273,8 @@ export function startLiveBranchRevenueSync(db: Firestore | null | undefined): ()
       // 5. package_members (Care Packages, Advances & Installments)
       for (const pkg of packageMemberDocs) {
         if (!pkg) continue;
+        if (pkg.id && seenAppointmentIds.has(pkg.id)) continue;
+
         if (Array.isArray(pkg.paymentHistory) && pkg.paymentHistory.length > 0) {
           pkg.paymentHistory.forEach((inst: any, idx: number) => {
             const instAmt = extractCleanNum(inst.amount || inst.paidAmount);
@@ -370,22 +326,32 @@ export function startLiveBranchRevenueSync(db: Firestore | null | undefined): ()
 
         getDoc(docRef).then((snap) => {
           const existing = snap.exists() ? snap.data() : {};
-          const existingTarget = Number(existing?.monthlyTarget) || 0;
           const existingReached = Number(existing?.targetReached) || 0;
+          const monthlyTargets = existing?.monthlyTargets || {};
 
-          if (existingReached !== liveReached || existing.month !== currentMonthPrefix) {
-            const monthlyTarget = existingTarget > 0 ? existingTarget : 0;
-            const remaining = monthlyTarget > 0 ? Math.max(0, monthlyTarget - liveReached) : 0;
-            const percentage = monthlyTarget > 0 ? Math.round((liveReached / monthlyTarget) * 100) : 0;
+          // Always prefer the explicit target configured for the current month
+          let monthlyTarget = (monthlyTargets[currentMonthPrefix] !== undefined && Number(monthlyTargets[currentMonthPrefix]) > 0)
+            ? Number(monthlyTargets[currentMonthPrefix])
+            : (Number(existing?.monthlyTarget) || 0);
+
+          // Never degrade an authoritative targetReached with an incomplete live sum
+          const effectiveReached = Math.max(existingReached, liveReached);
+
+          if (existingReached !== effectiveReached || existing.monthlyTarget !== monthlyTarget || existing.currentMonth !== currentMonthPrefix || existing.month !== currentMonthPrefix) {
+            const remaining = monthlyTarget > 0 ? Math.max(0, monthlyTarget - effectiveReached) : 0;
+            const percentage = monthlyTarget > 0 ? Math.min(Math.round((effectiveReached / monthlyTarget) * 100), 100) : 0;
+            const isReached = monthlyTarget > 0 && effectiveReached >= monthlyTarget;
 
             const payload: any = {
               id: key,
               branchId: key,
               branchName: getCanonicalBranchName(key),
+              currentMonth: currentMonthPrefix,
               month: currentMonthPrefix,
-              targetReached: liveReached,
+              targetReached: effectiveReached,
               remaining,
               percentage,
+              isReached,
               updatedAt: new Date().toISOString()
             };
 

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput,
-  Alert, ActivityIndicator, Image, Modal, Platform, PermissionsAndroid
+  Alert, ActivityIndicator, Image, Modal, Platform, PermissionsAndroid, BackHandler
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -76,6 +76,20 @@ export const StaffScreen: React.FC<StaffScreenProps> = ({
 
   useEffect(() => {
     AsyncStorage.setItem('@sph_staff_tab', activeTab).catch(() => {});
+  }, [activeTab]);
+
+  // Native Android Hardware / Gesture Back Navigation Handler
+  useEffect(() => {
+    const onHardwareBack = () => {
+      if (activeTab !== 'punch') {
+        setActiveTab('punch');
+        return true;
+      }
+      return false; // Bubbles to root App.tsx handler for exit confirmation
+    };
+
+    const sub = BackHandler.addEventListener('hardwareBackPress', onHardwareBack);
+    return () => sub.remove();
   }, [activeTab]);
 
   // Staff details

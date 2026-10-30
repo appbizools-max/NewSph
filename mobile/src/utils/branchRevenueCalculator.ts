@@ -8,22 +8,19 @@ export interface BranchTargetResult {
   targetReached: number;
   remaining: number;
   percentage: number;
+  isReached: boolean;
+  currentMonth?: string;
+  nextMonth?: string;
+  nextMonthTarget?: number;
 }
-
-export const DEFAULT_BRANCH_MONTHLY_GOALS: Record<string, number> = {
-  kphb: 725000,
-  nallagandla: 325000,
-  dilshuknagar: 225000,
-  chandanagar: 550000,
-};
 
 export const normalizeBranchKey = (raw: string = ''): string => {
   const s = String(raw || '').toLowerCase().trim();
-  if (s.includes('kphb') || s.includes('kukatpally')) return 'kphb';
-  if (s.includes('nalla') || s.includes('nallagandla')) return 'nallagandla';
-  if (s.includes('dilshuk') || s.includes('dilsukh') || s.includes('dsnr') || s.includes('dshnr')) return 'dilshuknagar';
-  if (s.includes('chanda') || s.includes('chnr') || s.includes('chandanagar')) return 'chandanagar';
-  return 'kphb';
+  if (s.includes('kphb') || s.includes('kphp') || s.includes('kpb') || s.includes('kukatpally') || s.startsWith('sph-kpb')) return 'kphb';
+  if (s.includes('nalla') || s.includes('nallagandla') || s.includes('ngla') || s.includes('nlg') || s.startsWith('sph-nlg')) return 'nallagandla';
+  if (s.includes('dilshuk') || s.includes('dilsukh') || s.includes('dsnr') || s.includes('dsn') || s.startsWith('sph-dil') || s.includes('rk/dsnr')) return 'dilshuknagar';
+  if (s.includes('chand') || s.includes('chanda') || s.includes('chandnagar') || s.includes('chandanagar') || s.includes('chnr') || s.includes('chn') || s.includes('cngr') || s.startsWith('sph-chn') || s.endsWith('/cn')) return 'chandanagar';
+  return '';
 };
 
 export const getCanonicalBranchName = (keyOrName: string = ''): string => {
@@ -79,15 +76,73 @@ export const normalizeToYMD = (raw: any): string => {
   return '';
 };
 
-export const getCurrentMonthYMD = (): string => {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
+export const getCurrentMonthYMD = (baseDate: Date = new Date()): string => {
+  const y = baseDate.getFullYear();
+  const m = String(baseDate.getMonth() + 1).padStart(2, '0');
   return `${y}-${m}`;
 };
 
+export const getNextMonthYMD = (baseDate: Date = new Date()): string => {
+  const next = new Date(baseDate.getFullYear(), baseDate.getMonth() + 1, 1);
+  const y = next.getFullYear();
+  const m = String(next.getMonth() + 1).padStart(2, '0');
+  return `${y}-${m}`;
+};
+
+export const isMonthEndUnlockedForHR = (now: Date = new Date()): boolean => {
+  const totalDaysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const unlockDay = totalDaysInMonth - 2;
+  return now.getDate() >= unlockDay;
+};
+
 /**
- * Calculates the exact dynamic revenue collected this month for a given branch
+ * Reconciles raw Firestore branchTargets document with current calendar month boundaries.
+ * Enforces per-month isolation and automated rollover without hardcoded fallbacks.
+ */
+export const reconcileBranchTargetData = (data: any, branchKey: string) => {
+  const now = new Date();
+  const currentMonthStr = getCurrentMonthYMD(now);
+  const nextMonthStr = getNextMonthYMD(now);
+
+  const monthlyTargets: Record<string, number> = data?.monthlyTargets || {};
+
+  let monthlyTarget = 0;
+  if (monthlyTargets[currentMonthStr] !== undefined && Number(monthlyTargets[currentMonthStr]) > 0) {
+    monthlyTarget = Number(monthlyTargets[currentMonthStr]);
+  } else if (data?.currentMonth === currentMonthStr || data?.month === currentMonthStr) {
+    monthlyTarget = Number(data?.monthlyTarget) || 0;
+  }
+
+  const nextMonthTarget = (monthlyTargets[nextMonthStr] !== undefined)
+    ? Number(monthlyTargets[nextMonthStr])
+    : (Number(data?.nextMonthTarget) || 0);
+
+  const targetReached = (data?.currentMonth === currentMonthStr || data?.month === currentMonthStr)
+    ? (Number(data?.targetReached) || 0)
+    : 0;
+
+  const remaining = monthlyTarget > 0 ? Math.max(0, monthlyTarget - targetReached) : 0;
+  const percentage = monthlyTarget > 0 ? Math.min(Math.round((targetReached / monthlyTarget) * 100), 100) : 0;
+  const isReached = monthlyTarget > 0 && targetReached >= monthlyTarget;
+
+  return {
+    id: branchKey,
+    branchId: branchKey,
+    branchName: data?.branchName || getCanonicalBranchName(branchKey),
+    currentMonth: currentMonthStr,
+    nextMonth: nextMonthStr,
+    monthlyTarget,
+    nextMonthTarget,
+    targetReached,
+    remaining,
+    percentage,
+    isReached,
+    monthlyTargets
+  };
+};
+
+/**
+ * Calculates dynamic revenue collected this month for a given branch
  * from all paid appointments (consultation, medicine, package, split) and package memberships.
  */
 export const calculateRealBranchRevenue = (
@@ -104,7 +159,7 @@ export const calculateRealBranchRevenue = (
   let totalRevenue = 0;
   const seenPaymentIds = new Set<string>();
 
-  // 1. Process all appointments (consultations, consultation_med, packages, split payments)
+  // 1. Process all appointments (consultations, medicine, packages, split payments)
   for (const app of appointments) {
     if (!app) continue;
 
@@ -113,6 +168,8 @@ export const calculateRealBranchRevenue = (
 
     const s = String(app.status || '').toLowerCase().trim();
     const p = String(app.paymentStatus || '').toLowerCase().trim();
+    if (s === 'cancelled' || s === 'canceled' || p === 'cancelled' || p === 'failed') continue;
+
     const isPaid = p === 'paid' || s === 'completed' || s === 'done' || s === 'paid' || (Number(app.totalPaid) > 0);
     if (!isPaid) continue;
 
@@ -144,14 +201,14 @@ export const calculateRealBranchRevenue = (
     totalRevenue += paidAmt;
   }
 
-  // 2. Process package members (advance & installment collections) where not already counted
+  // 2. Process package members where not already counted
   for (const pkg of packageMembers) {
     if (!pkg) continue;
 
     const pkgBranch = pkg.branch || pkg.targetBranch || pkg.branchName;
     if (normalizeBranchKey(pkgBranch) !== targetKey) continue;
 
-    const rawDate = pkg.createdAt || pkg.startDate || pkg.updatedAt;
+    const rawDate = pkg.paymentCollectedAt || pkg.createdAt || pkg.startDate || pkg.updatedAt;
     const ymd = normalizeToYMD(rawDate);
     if (!ymd || !ymd.startsWith(monthPrefix)) continue;
 
@@ -170,7 +227,8 @@ export const calculateRealBranchRevenue = (
     ? Number(customMonthlyTarget)
     : 0;
   const remaining = monthlyTarget > 0 ? Math.max(0, monthlyTarget - totalRevenue) : 0;
-  const percentage = monthlyTarget > 0 ? Math.round((totalRevenue / monthlyTarget) * 100) : 0;
+  const percentage = monthlyTarget > 0 ? Math.min(Math.round((totalRevenue / monthlyTarget) * 100), 100) : 0;
+  const isReached = monthlyTarget > 0 && totalRevenue >= monthlyTarget;
 
   return {
     branchKey: targetKey,
@@ -179,39 +237,40 @@ export const calculateRealBranchRevenue = (
     targetReached: totalRevenue,
     remaining,
     percentage,
+    isReached
   };
 };
 
 /**
  * Persists calculated dynamic branch targets to Firestore `branchTargets` collection.
- * Does NOT overwrite Firestore monthlyTarget unless customMonthlyTarget is explicitly passed and > 0.
  */
 export const syncBranchTargetToFirestore = async (
-  arg1: any,
-  arg2: any,
-  arg3?: number,
-  arg4?: any
+  firestoreDbOrBranchName: Firestore | string,
+  branchNameOrReached?: string | number,
+  reachedOrCustomTarget?: number,
+  customTargetOrDb?: number | Firestore
 ): Promise<void> => {
   let activeDb: Firestore | null = null;
   let branchName = '';
   let targetReached = 0;
   let customMonthlyTarget: number | undefined = undefined;
 
-  if (typeof arg1 === 'string') {
-    branchName = arg1;
-    targetReached = Number(arg2) || 0;
-    customMonthlyTarget = arg3;
-    activeDb = arg4 || getSafeDb();
+  if (typeof firestoreDbOrBranchName === 'string') {
+    branchName = firestoreDbOrBranchName;
+    targetReached = Number(branchNameOrReached) || 0;
+    customMonthlyTarget = reachedOrCustomTarget;
+    activeDb = (customTargetOrDb as Firestore) || getSafeDb();
   } else {
-    activeDb = arg1 || getSafeDb();
-    branchName = String(arg2 || '');
-    targetReached = Number(arg3) || 0;
-    customMonthlyTarget = typeof arg4 === 'number' ? arg4 : undefined;
+    activeDb = firestoreDbOrBranchName || getSafeDb();
+    branchName = String(branchNameOrReached || '');
+    targetReached = Number(reachedOrCustomTarget) || 0;
+    customMonthlyTarget = typeof customTargetOrDb === 'number' ? customTargetOrDb : undefined;
   }
 
   if (!activeDb) return;
   const branchKey = normalizeBranchKey(branchName);
   const canonName = getCanonicalBranchName(branchKey);
+  const currentMonthStr = getCurrentMonthYMD();
 
   try {
     const docRef = doc(activeDb, 'branchTargets', branchKey);
@@ -228,22 +287,25 @@ export const syncBranchTargetToFirestore = async (
           effectiveTargetReached = existingReached;
         }
       }
-    } catch (_) {}
+    } catch (_) { }
 
     const targetGoal = (customMonthlyTarget !== undefined && customMonthlyTarget !== null && Number(customMonthlyTarget) > 0)
       ? Number(customMonthlyTarget)
       : existingMonthlyTarget;
 
     const remaining = targetGoal > 0 ? Math.max(0, targetGoal - effectiveTargetReached) : 0;
-    const percentage = targetGoal > 0 ? Math.round((effectiveTargetReached / targetGoal) * 100) : 0;
+    const percentage = targetGoal > 0 ? Math.min(Math.round((effectiveTargetReached / targetGoal) * 100), 100) : 0;
 
     const updatePayload: any = {
       id: branchKey,
+      branchId: branchKey,
       branchName: canonName,
       targetReached: effectiveTargetReached,
       remaining,
       percentage,
-      month: getCurrentMonthYMD(),
+      isReached: targetGoal > 0 && effectiveTargetReached >= targetGoal,
+      currentMonth: currentMonthStr,
+      month: currentMonthStr,
       updatedAt: new Date().toISOString(),
     };
 
@@ -259,33 +321,48 @@ export const syncBranchTargetToFirestore = async (
 
 /**
  * Atomically increments targetReached by a newly collected payment
- * without recalculating or resetting from partial queue data.
+ * without resetting or relying on arbitrary hardcoded fallbacks.
  */
 export const incrementBranchTargetRevenue = async (
-  branchName: string,
-  amountPaid: number,
-  dbInstance?: any
+  branchNameOrDb: string | Firestore,
+  amountPaidOrBranchName: number | string,
+  maybeDb?: Firestore
 ): Promise<void> => {
-  const activeDb = dbInstance || getSafeDb();
+  let activeDb: Firestore | null = null;
+  let branchName = '';
+  let amountPaid = 0;
+
+  if (typeof branchNameOrDb === 'string') {
+    branchName = branchNameOrDb;
+    amountPaid = Number(amountPaidOrBranchName) || 0;
+    activeDb = maybeDb || getSafeDb();
+  } else {
+    activeDb = branchNameOrDb || getSafeDb();
+    branchName = String(amountPaidOrBranchName || '');
+    amountPaid = Number(maybeDb) || 0;
+  }
+
   if (!activeDb || !amountPaid || amountPaid <= 0) return;
   const branchKey = normalizeBranchKey(branchName);
   const canonName = getCanonicalBranchName(branchKey);
+  const currentMonthStr = getCurrentMonthYMD();
 
   try {
     const docRef = doc(activeDb, 'branchTargets', branchKey);
     const snap = await getDoc(docRef);
-    let existingMonthlyTarget = DEFAULT_BRANCH_MONTHLY_GOALS[branchKey] || 725000;
+    let existingMonthlyTarget = 0;
     let existingReached = 0;
 
     if (snap.exists()) {
       const data = snap.data();
-      existingMonthlyTarget = Number(data?.monthlyTarget) || existingMonthlyTarget;
+      existingMonthlyTarget = Number(data?.monthlyTarget) || 0;
       existingReached = Number(data?.targetReached) || 0;
     }
 
     const newReached = existingReached + amountPaid;
     const remaining = existingMonthlyTarget > 0 ? Math.max(0, existingMonthlyTarget - newReached) : 0;
-    const percentage = existingMonthlyTarget > 0 ? Math.round((newReached / existingMonthlyTarget) * 100) : 0;
+    const percentage = existingMonthlyTarget > 0 ? Math.min(Math.round((newReached / existingMonthlyTarget) * 100), 100) : 0;
+    const isReached = existingMonthlyTarget > 0 && newReached >= existingMonthlyTarget;
 
     await setDoc(docRef, {
       id: branchKey,
@@ -295,11 +372,12 @@ export const incrementBranchTargetRevenue = async (
       targetReached: newReached,
       remaining,
       percentage,
-      month: getCurrentMonthYMD(),
+      isReached,
+      currentMonth: currentMonthStr,
+      month: currentMonthStr,
       updatedAt: new Date().toISOString()
     }, { merge: true });
   } catch (err) {
     console.warn('Error incrementing branch target revenue:', err);
   }
 };
-

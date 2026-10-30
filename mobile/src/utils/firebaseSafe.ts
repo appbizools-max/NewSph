@@ -17,6 +17,7 @@ import {
   serverTimestamp,
   orderBy,
   arrayUnion,
+  arrayRemove,
   runTransaction,
   increment,
   Firestore
@@ -80,6 +81,7 @@ export {
   serverTimestamp,
   orderBy,
   arrayUnion,
+  arrayRemove,
   runTransaction,
   increment
 };

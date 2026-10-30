@@ -37,6 +37,7 @@ import { DoctorScreen } from './src/screens/Doctor/DoctorScreen';
 import { StaffScreen } from './src/screens/Staff/StaffScreen';
 import { PatientFileMobileScreen } from './src/screens/PatientFile/PatientFileMobileScreen';
 import { NotificationsScreen } from './src/screens/Notifications/NotificationsScreen';
+import { TelecallerPortalScreen } from './src/screens/Telecaller/TelecallerPortalScreen';
 
 import { UserRole, signOutUser, CanonicalBranchId, resolveCanonicalBranchId, BRANCHES, resolveStrictDoctorName, sanitizeDoctorName } from '@app/shared';
 import { getSafeDb, collection, query, where, onSnapshot, doc, orderBy, limit } from './src/utils/firebaseSafe';
@@ -207,7 +208,7 @@ function MainApp() {
   const [cleaningSubmissions, setCleaningSubmissions] = useState<CleaningSubmission[]>([]);
 
   useEffect(() => {
-    if (isLoadingSession || userRole === 'admin' || userRole === 'hr' || userRole === 'doctor' || userRole === 'staff') return;
+    if (isLoadingSession || userRole === 'admin' || userRole === 'hr' || userRole === 'doctor' || userRole === 'staff' || userRole === 'telecaller') return;
     const activeDb = getSafeDb();
     if (!activeDb) return;
     const normBranch = normalizeBranchName(branchName);
@@ -254,7 +255,7 @@ function MainApp() {
   }, [isLoadingSession, userRole, branchName]);
 
   const cleaningLockout = useMemo(() => {
-    if (userRole === 'admin' || userRole === 'hr' || userRole === 'doctor' || userRole === 'staff') {
+    if (userRole === 'admin' || userRole === 'hr' || userRole === 'doctor' || userRole === 'staff' || userRole === 'telecaller') {
       return { isBlocked: false, reason: '' };
     }
     return checkBranchLockoutStatus(cleaningSchedule.assignedDate, cleaningSubmissions, new Date());
@@ -574,23 +575,23 @@ function MainApp() {
 
             if (shouldNotify && isFresh) {
               const notiTitle = noti.title || (
-                noti.type === 'staff_punch_in' ? '🟢 Staff Punched In' :
-                  noti.type === 'staff_punch_out' ? '🔴 Staff Punched Out' :
+                noti.type === 'staff_punch_in' ? '≡ƒƒó Staff Punched In' :
+                  noti.type === 'staff_punch_out' ? '≡ƒö┤ Staff Punched Out' :
                     noti.type === 'staff_login' ? 'Staff Logged In' :
                       noti.type === 'staff_logout' ? 'Staff Logged Out' :
                         noti.type === 'staff_report' ? 'Daily Report Submitted' :
-                          noti.type === 'staff_leave_request' ? '📝 Staff Leave Application' :
-                            noti.type === 'fee_discount_request' ? '🏷️ Discount Approval Request' :
-                              noti.type === 'fee_discount_response' ? (noti.status === 'approved' ? 'Discount Request Approved ✓' : 'Discount Request Rejected ❌') :
-                                noti.type === 'cleaning_submission' ? `${noti.branch || 'Branch'} Cleaning Photos Uploaded 📸` :
-                                  noti.type === 'cleaning_approved' ? `${noti.branch || 'Branch'} Cleaning Approved ✅` :
-                                    noti.type === 'cleaning_rejected' ? `${noti.branch || 'Branch'} Cleaning Rejected ❌` :
+                          noti.type === 'staff_leave_request' ? '≡ƒô¥ Staff Leave Application' :
+                            noti.type === 'fee_discount_request' ? '≡ƒÅ╖∩╕Å Discount Approval Request' :
+                              noti.type === 'fee_discount_response' ? (noti.status === 'approved' ? 'Discount Request Approved Γ£ô' : 'Discount Request Rejected Γ¥î') :
+                                noti.type === 'cleaning_submission' ? `${noti.branch || 'Branch'} Cleaning Photos Uploaded ≡ƒô╕` :
+                                  noti.type === 'cleaning_approved' ? `${noti.branch || 'Branch'} Cleaning Approved Γ£à` :
+                                    noti.type === 'cleaning_rejected' ? `${noti.branch || 'Branch'} Cleaning Rejected Γ¥î` :
                                       noti.type === 'payment' ? 'Payment Received' : 'Appointment Booked'
               );
 
               const notiBody = noti.body || (
                 noti.type === 'staff_punch_in' ? `${noti.staffName || 'Staff'} punched in at ${noti.branch || 'Branch'} (${noti.punchInTime || ''})` :
-                  noti.type === 'staff_punch_out' ? `${noti.staffName || 'Staff'} punched out from ${noti.branch || 'Branch'} (${noti.punchOutTime || ''})${noti.workingHours ? ` • Worked: ${noti.workingHours}` : ''}` :
+                  noti.type === 'staff_punch_out' ? `${noti.staffName || 'Staff'} punched out from ${noti.branch || 'Branch'} (${noti.punchOutTime || ''})${noti.workingHours ? ` ΓÇó Worked: ${noti.workingHours}` : ''}` :
                     noti.type === 'staff_login' ? `${noti.staffName} logged in at ${noti.branch}` :
                       noti.type === 'staff_logout' ? `${noti.staffName} logged out from ${noti.branch}` :
                         noti.type === 'staff_report' ? `${noti.staffName} submitted Daily Report for ${noti.branch}` :
@@ -600,7 +601,7 @@ function MainApp() {
                                 noti.type === 'cleaning_submission' ? `${noti.photoCount || 5} clinic cleaning photos uploaded from ${noti.branch} for HR inspection.` :
                                   noti.type === 'cleaning_approved' ? `Clinic cleaning approved by ${noti.reviewedBy || 'HR'} for ${noti.branch}. Reception is unlocked.` :
                                     noti.type === 'cleaning_rejected' ? `Cleaning submission for ${noti.branch} rejected by ${noti.reviewedBy || 'HR'}. Please re-upload photos.` :
-                                      noti.type === 'payment' ? `Payment of ₹${Number(noti.amount || 0).toLocaleString('en-IN')} received from ${noti.patientName} (${noti.branch})` :
+                                      noti.type === 'payment' ? `Payment of Γé╣${Number(noti.amount || 0).toLocaleString('en-IN')} received from ${noti.patientName} (${noti.branch})` :
                                         `Appointment booked for ${noti.patientName} at ${noti.appointmentTime} (${noti.branch})`
               );
 
@@ -609,9 +610,9 @@ function MainApp() {
               // For Branch Reception, also show immediate in-app Alert when cleaning is Approved or Rejected
               if (isBranchReception) {
                 if (noti.type === 'cleaning_approved') {
-                  Alert.alert('Cleaning Approved ✅', notiBody);
+                  Alert.alert('Cleaning Approved Γ£à', notiBody);
                 } else if (noti.type === 'cleaning_rejected') {
-                  Alert.alert('Cleaning Rejected ❌', notiBody);
+                  Alert.alert('Cleaning Rejected Γ¥î', notiBody);
                 }
               }
             }
@@ -1025,7 +1026,7 @@ function MainApp() {
   };
 
   // Compulsory Weekly Cleaning Lockout Guard for Reception
-  if (isCleaningBlocked && userRole !== 'admin' && userRole !== 'hr' && userRole !== 'doctor' && userRole !== 'staff' && activeTab !== 'auth') {
+  if (isCleaningBlocked && userRole !== 'admin' && userRole !== 'hr' && userRole !== 'doctor' && userRole !== 'staff' && userRole !== 'telecaller' && activeTab !== 'auth') {
     return (
       <SafeAreaView style={styles.container}>
         <StatusBar style="dark" />
@@ -1057,6 +1058,22 @@ function MainApp() {
           />
         </View>
       </SafeAreaView>
+    );
+  }
+
+  if (userRole === 'telecaller' && !isAuthScreen) {
+    return (
+      <TelecallerPortalScreen
+        authSession={{
+          uid: staffId,
+          userName: userName || 'Telecaller',
+          staffId: staffId || userName,
+          branchId: branchId,
+          branchName: branchName,
+          branchPhone: branchPhone
+        }}
+        onSignOut={handleSignOut}
+      />
     );
   }
 

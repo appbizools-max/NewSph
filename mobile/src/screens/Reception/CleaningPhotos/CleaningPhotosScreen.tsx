@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   StyleSheet, Text, View, ScrollView, TouchableOpacity,
-  Image, TextInput, Alert, Modal, ActivityIndicator, Dimensions
+  Image, TextInput, Alert, Modal, ActivityIndicator, Dimensions, Linking, Platform
 } from 'react-native';
 import { Ionicons, Feather } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -132,10 +132,26 @@ export const CleaningPhotosScreen: React.FC<CleaningPhotosScreenProps> = ({
       return;
     }
     try {
-      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!perm.granted) {
-        Alert.alert('Permission Required', 'Gallery access is needed to select clinic photos.');
-        return;
+      if (Platform.OS === 'ios') {
+        const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!perm.granted) {
+          Alert.alert(
+            'Permission Required',
+            'Gallery access in Settings is needed to select clinic photos.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Open Settings', onPress: () => Linking.openSettings() }
+            ]
+          );
+          return;
+        }
+      } else {
+        try {
+          const perm = await ImagePicker.getMediaLibraryPermissionsAsync();
+          if (!perm.granted && perm.canAskAgain) {
+            await ImagePicker.requestMediaLibraryPermissionsAsync();
+          }
+        } catch (_) {}
       }
       const remaining = 7 - selectedPhotos.length;
       const res = await ImagePicker.launchImageLibraryAsync({
@@ -150,9 +166,21 @@ export const CleaningPhotosScreen: React.FC<CleaningPhotosScreenProps> = ({
         const uris = res.assets.map(a => a.base64 ? `data:image/jpeg;base64,${a.base64}` : a.uri);
         setSelectedPhotos(prev => [...prev, ...uris].slice(0, 7));
       }
-    } catch (e) {
+    } catch (e: any) {
       console.warn('Error picking from gallery:', e);
-      Alert.alert('Error', 'Could not access gallery.');
+      const isPermError = e?.message?.toLowerCase()?.includes('permission') || e?.code === 'ERR_MISSING_PERMISSION';
+      if (isPermError) {
+        Alert.alert(
+          'Permission Required',
+          'Please allow photo gallery access in Settings to select clinic photos.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Open Settings', onPress: () => Linking.openSettings() }
+          ]
+        );
+      } else {
+        Alert.alert('Error', 'Could not access gallery.');
+      }
     }
   };
 

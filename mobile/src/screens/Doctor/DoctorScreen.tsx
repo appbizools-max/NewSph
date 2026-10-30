@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, SafeAreaView } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, SafeAreaView, BackHandler } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { DoctorDashboardScreen } from './Dashboard/DoctorDashboardScreen';
@@ -41,6 +41,24 @@ export const DoctorScreen: React.FC<DoctorScreenProps> = ({
 
   // Enforce role restriction: If active tab is packages or revenue but not head doctor, fall back to dashboard
   const currentTab = (!isHeadDoctor && (activeTab === 'packages' || activeTab === 'revenue')) ? 'dashboard' : activeTab;
+
+  // Native Android Hardware / Gesture Back Navigation Handler
+  useEffect(() => {
+    const onHardwareBack = () => {
+      if (drawerOpen) {
+        setDrawerOpen(false);
+        return true;
+      }
+      if (currentTab !== 'dashboard') {
+        setActiveTab('dashboard');
+        return true;
+      }
+      return false; // Bubbles to root App.tsx handler for exit confirmation
+    };
+
+    const sub = BackHandler.addEventListener('hardwareBackPress', onHardwareBack);
+    return () => sub.remove();
+  }, [drawerOpen, currentTab]);
 
   return (
     <SafeAreaView style={styles.safeArea}>

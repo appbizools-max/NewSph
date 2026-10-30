@@ -114,8 +114,8 @@ android {
         applicationId 'com.spiritualhomeo.staff'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 16
-        versionName "1.0.6"
+        versionCode 18
+        versionName "1.0.8"
     }
     signingConfigs {
         debug {

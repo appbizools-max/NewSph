@@ -501,7 +501,7 @@ export const AppointmentsQueueUI: React.FC<AppointmentsQueueUIProps> = ({
             patientName: targetApp.name || 'Patient',
             phone: targetApp.phone || '',
             invoiceId: targetApp.id,
-            totalPaid: Number(targetApp.targetAmount || (targetApp as any).totalPaid || 1000),
+            totalPaid: Number(targetApp.targetAmount || (targetApp as any).totalPaid || 0),
             paymentMode: (targetApp as any).paymentMode || 'UPI',
             branch: targetApp.branch || 'KPHB',
             doctorName: targetApp.doctorName || targetApp.assignedDoctor || 'Dr. Prashanth K Vaidya'

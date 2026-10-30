@@ -59,6 +59,16 @@ service cloud.firestore {
       allow read, write: if isClinicStaff();
     }
 
+    // Telecaller Accounts & Audit Trail
+    match /telecallers/{telecallerId} {
+      allow read: if true; // Needed for telecaller authentication
+      allow write: if isClinicStaff(); // Managed by Admin & HR
+    }
+
+    match /telecallerActivities/{activityId} {
+      allow read, write: if isClinicStaff();
+    }
+
     match /package_members/{memberId} {
       allow read, write: if isClinicStaff();
     }

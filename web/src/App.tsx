@@ -13,10 +13,12 @@ const HRDashboardPage = lazy(() => import('./pages/HR/HRDashboardPage').then(m =
 const DoctorLayout = lazy(() => import('./pages/Doctor/DoctorLayout').then(m => ({ default: m.DoctorLayout })));
 const StaffDashboardPage = lazy(() => import('./pages/Staff/StaffDashboardPage').then(m => ({ default: m.StaffDashboardPage })));
 const PatientFilePage = lazy(() => import('./pages/PatientFile/PatientFilePage').then(m => ({ default: m.PatientFilePage })));
+const TelecallerLayout = lazy(() => import('./pages/Telecaller/TelecallerLayout').then(m => ({ default: m.TelecallerLayout })));
 // Lazy Loaded Reception Sub-Pages
 const ReceptionLayout = lazy(() => import('./pages/Reception/ReceptionLayout').then(m => ({ default: m.ReceptionLayout })));
 const ReceptionDashboardPage = lazy(() => import('./pages/Reception/Dashboard/ReceptionDashboardPage').then(m => ({ default: m.ReceptionDashboardPage })));
 const BookAppointmentPage = lazy(() => import('./pages/Reception/BookAppointment/BookAppointmentPage').then(m => ({ default: m.BookAppointmentPage })));
+const RebackAppointmentPage = lazy(() => import('./pages/Reception/RebackAppointment/RebackAppointmentPage').then(m => ({ default: m.RebackAppointmentPage })));
 const AllPatientsPage = lazy(() => import('./pages/Reception/AllPatients/AllPatientsPage').then(m => ({ default: m.AllPatientsPage })));
 const FollowUpsPage = lazy(() => import('./pages/Reception/FollowUps/FollowUpsPage').then(m => ({ default: m.FollowUpsPage })));
 const MedicineRequestsPage = lazy(() => import('./pages/Reception/MedicineRequests/MedicineRequestsPage').then(m => ({ default: m.MedicineRequestsPage })));
@@ -66,6 +68,7 @@ export default function App() {
         if (parsed?.role === 'hr') return 'hr';
         if (parsed?.role === 'doctor') return 'doctor';
         if (parsed?.role === 'staff') return 'staff';
+        if (parsed?.role === 'telecaller') return 'telecaller';
         return 'reception_dashboard';
       }
     } catch (e) { }
@@ -125,6 +128,9 @@ export default function App() {
     } else if (data.role === 'staff') {
       setActiveTab('staff');
       window.history.pushState({}, '', '/staff');
+    } else if (data.role === 'telecaller') {
+      setActiveTab('telecaller');
+      window.history.pushState({}, '', '/telecaller');
     } else {
       setActiveTab('reception_dashboard');
       window.history.pushState({}, '', '/reception');
@@ -198,6 +204,12 @@ export default function App() {
         {visitedReceptionTabs.has('reception_book') && (
           <div style={{ display: activeTab === 'reception_book' ? 'block' : 'none' }}>
             <BookAppointmentPage currentBranch={branchName} userRole={userRole} onNavigate={setActiveTab} />
+          </div>
+        )}
+
+        {visitedReceptionTabs.has('reception_reback') && (
+          <div style={{ display: activeTab === 'reception_reback' ? 'block' : 'none' }}>
+            <RebackAppointmentPage currentBranch={branchName} userRole={userRole} onNavigate={handleNavigateWithData} />
           </div>
         )}
 
@@ -310,6 +322,22 @@ export default function App() {
       );
     }
 
+    if (userRole === 'telecaller') {
+      return (
+        <TelecallerLayout
+          authSession={{
+            uid: staffId || authSession?.staffId,
+            userName: userName || authSession?.userName || 'Telecaller',
+            staffId: staffId || authSession?.staffId || 'TC01',
+            branchId: branchId,
+            branchName: branchName,
+            branchPhone: branchPhone
+          }}
+          onSignOut={handleLogout}
+        />
+      );
+    }
+
     if (isReceptionRoute) {
       return (
         <ReceptionLayout activeTab={activeTab} setActiveTab={setActiveTab}>
@@ -337,7 +365,7 @@ export default function App() {
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: '#f8fafc' }}>
       {/* Hide navbar on Login page */}
-      {!isAuthPage && (
+      {!isAuthPage && userRole !== 'telecaller' && (
         <Navbar
           activeTab={activeTab}
           setActiveTab={(tab) => {
@@ -360,7 +388,7 @@ export default function App() {
       </main>
 
       {/* Hide footer on Login page */}
-      {!isAuthPage && (
+      {!isAuthPage && userRole !== 'telecaller' && (
         <footer style={{
           background: '#ffffff',
           borderTop: '1px solid #e2e8f0',

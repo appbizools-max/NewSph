@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { Building2, Edit3, Lock, Unlock, Calendar, CheckCircle2, ArrowLeft } from 'lucide-react';
-import { doc, onSnapshot, setDoc, collection } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot, setDoc, collection } from 'firebase/firestore';
 import { db } from '@app/shared';
 import { TargetProgressWebUI } from '../../../components/TargetProgressWebUI';
+import { receptionDataStore } from '../../../utils/receptionDataStore';
+import { reconcileBranchTargetData, getCurrentMonthYMD, getNextMonthYMD, calculateRealBranchRevenue } from '../../../utils/branchRevenueCalculator';
 
 const DEFAULT_BRANCHES = [
   { id: 'kphb', name: 'KPHB Branch', phone: '+91 90301 76176', monthlyTarget: 725000, targetReached: 0, nextMonthTarget: 0 },
@@ -47,18 +49,21 @@ export const ManageBranchesPage: React.FC<ManageBranchesPageProps> = ({ onBack, 
             liveMap[docSnap.id.toLowerCase()] = docSnap.data();
           });
 
+          const allPool = receptionDataStore.getAllCollectionsPool() || [];
+          const pkgPool = receptionDataStore.getPackageMembers() || [];
+
           setBranches((prev) =>
             prev.map((b) => {
               const live = liveMap[b.id.toLowerCase()] || liveMap[b.name.toLowerCase()];
-              if (live) {
-                return {
-                  ...b,
-                  monthlyTarget: Number(live.monthlyTarget) || b.monthlyTarget,
-                  targetReached: live.targetReached !== undefined ? Number(live.targetReached) : b.targetReached,
-                  nextMonthTarget: live.nextMonthTarget !== undefined ? Number(live.nextMonthTarget) : 0,
-                };
-              }
-              return b;
+              const reconciled = reconcileBranchTargetData(live, b.id);
+              const realRev = calculateRealBranchRevenue(b.name, allPool, pkgPool, reconciled.monthlyTarget);
+              const bestReached = Math.max(reconciled.targetReached || 0, realRev.targetReached || 0);
+              return {
+                ...b,
+                monthlyTarget: reconciled.monthlyTarget,
+                targetReached: bestReached,
+                nextMonthTarget: reconciled.nextMonthTarget,
+              };
             })
           );
         }
@@ -70,10 +75,14 @@ export const ManageBranchesPage: React.FC<ManageBranchesPageProps> = ({ onBack, 
   }, []);
 
   const handleEditClick = (b: any, targetType: 'current' | 'next') => {
-    // Admin can edit at ANY time (both current and next month)
-    // HR can only enter or change targets 2 days before month end
-    if (!isAdmin && !isNextMonthUnlocked) {
-      alert(`🔒 HR Target Setting Locked: HR can enter or change targets only 2 days before month end (starts on ${now.toLocaleString('default', { month: 'short' })} ${unlockDay}th). Admin can edit targets anytime.`);
+    // Current month target is locked for HR once the month starts
+    if (!isAdmin && targetType === 'current') {
+      alert(`🔒 Target Setting Locked: HR cannot change the active month's target once the month has begun. Only Admin can edit the current month target. HR can set the upcoming month target starting 2 days before month end.`);
+      return;
+    }
+    // Next month target unlocks 2 days before month end for HR
+    if (!isAdmin && targetType === 'next' && !isNextMonthUnlocked) {
+      alert(`🔒 HR Target Setting Locked: HR can enter or change targets only 2 days before month end (unlocks on ${now.toLocaleString('default', { month: 'short' })} ${unlockDay}th). Admin can edit targets anytime.`);
       return;
     }
     setEditingBranch(b);
@@ -89,20 +98,31 @@ export const ManageBranchesPage: React.FC<ManageBranchesPageProps> = ({ onBack, 
       return;
     }
 
+    const currentMonthKey = getCurrentMonthYMD(now);
+    const nextMonthKey = getNextMonthYMD(now);
+
     try {
       const updateData: any = {
         branchId: editingBranch.id,
         branchName: editingBranch.name,
         updatedAt: new Date().toISOString(),
+        currentMonth: currentMonthKey,
+        nextMonth: nextMonthKey,
       };
 
       if (editingTargetType === 'current') {
+        const snap = await getDoc(doc(db, 'branchTargets', editingBranch.id)).catch(() => null);
+        const existingData = snap?.data() || {};
+        const liveReached = Math.max(Number(existingData.targetReached || 0), Number(editingBranch.targetReached || 0));
         updateData.monthlyTarget = num;
-        updateData.targetReached = editingBranch.targetReached || 0;
-        updateData.remaining = Math.max(0, num - (editingBranch.targetReached || 0));
-        updateData.percentage = num > 0 ? Math.round(((editingBranch.targetReached || 0) / num) * 100) : 0;
+        updateData.targetReached = liveReached;
+        updateData.remaining = Math.max(0, num - liveReached);
+        updateData.percentage = num > 0 ? Math.round((liveReached / num) * 100) : 0;
+        updateData.isReached = liveReached >= num;
+        updateData[`monthlyTargets.${currentMonthKey}`] = num;
       } else {
         updateData.nextMonthTarget = num;
+        updateData[`monthlyTargets.${nextMonthKey}`] = num;
       }
 
       await setDoc(doc(db, 'branchTargets', editingBranch.id), updateData, { merge: true });
@@ -301,21 +321,22 @@ export const ManageBranchesPage: React.FC<ManageBranchesPageProps> = ({ onBack, 
                   <button
                     type="button"
                     onClick={() => handleEditClick(b, 'current')}
+                    disabled={!isAdmin}
                     style={{
                       display: 'inline-flex',
                       alignItems: 'center',
                       gap: '6px',
-                      backgroundColor: '#258ec8',
-                      color: '#ffffff',
-                      border: 'none',
+                      backgroundColor: isAdmin ? '#258ec8' : '#f1f5f9',
+                      color: isAdmin ? '#ffffff' : '#94a3b8',
+                      border: `1px solid ${isAdmin ? '#258ec8' : '#cbd5e1'}`,
                       padding: '7px 14px',
                       borderRadius: '8px',
                       fontWeight: 700,
                       fontSize: '0.8rem',
-                      cursor: 'pointer'
+                      cursor: isAdmin ? 'pointer' : 'not-allowed'
                     }}
                   >
-                    <Edit3 size={14} /> Set {now.toLocaleString('default', { month: 'short' })} Target
+                    {isAdmin ? <><Edit3 size={14} /> Set {now.toLocaleString('default', { month: 'short' })} Target</> : <><Lock size={14} /> Active Target (Locked)</>}
                   </button>
                 ) : (
                   <button
@@ -326,9 +347,9 @@ export const ManageBranchesPage: React.FC<ManageBranchesPageProps> = ({ onBack, 
                       display: 'inline-flex',
                       alignItems: 'center',
                       gap: '6px',
-                      backgroundColor: !isLockedForRole ? '#258ec8' : '#f1f5f9',
+                      backgroundColor: !isLockedForRole ? '#16a34a' : '#f1f5f9',
                       color: !isLockedForRole ? '#ffffff' : '#94a3b8',
-                      border: `1px solid ${!isLockedForRole ? '#258ec8' : '#cbd5e1'}`,
+                      border: `1px solid ${!isLockedForRole ? '#16a34a' : '#cbd5e1'}`,
                       padding: '7px 14px',
                       borderRadius: '8px',
                       fontWeight: 700,
@@ -336,8 +357,7 @@ export const ManageBranchesPage: React.FC<ManageBranchesPageProps> = ({ onBack, 
                       cursor: !isLockedForRole ? 'pointer' : 'not-allowed'
                     }}
                   >
-                    {!isLockedForRole ? <Edit3 size={14} /> : <Lock size={14} />}
-                    {!isLockedForRole ? `Set ${nextMonthDate.toLocaleString('default', { month: 'short' })} Target` : 'Locked'}
+                    {!isLockedForRole ? <><Edit3 size={14} /> Set {nextMonthDate.toLocaleString('default', { month: 'short' })} Target</> : <><Lock size={14} /> Unlocks {now.toLocaleString('default', { month: 'short' })} {unlockDay}th</>}
                   </button>
                 )}
               </div>
@@ -442,7 +462,7 @@ export const ManageBranchesPage: React.FC<ManageBranchesPageProps> = ({ onBack, 
               type="number"
               value={targetInput}
               onChange={(e) => setTargetInput(e.target.value)}
-              placeholder="e.g. 1200000"
+              placeholder="Enter target amount (e.g. 725000)"
               style={{
                 width: '100%',
                 padding: '10px 14px',

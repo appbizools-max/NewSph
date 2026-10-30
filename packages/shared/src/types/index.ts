@@ -1,6 +1,6 @@
 import { CanonicalBranchId, BranchRegistrationCode } from '../branches/branchMaster';
 
-export type UserRole = 'admin' | 'doctor' | 'reception' | 'staff' | 'hr' | 'patient';
+export type UserRole = 'admin' | 'doctor' | 'reception' | 'staff' | 'hr' | 'patient' | 'telecaller';
 
 export interface Branch {
   id: CanonicalBranchId | string;
@@ -67,6 +67,61 @@ export interface UserProfile {
   photoURL?: string;
   createdAt: string;
 }
+
+export interface TelecallerProfile {
+  id?: string;
+  uid?: string;
+  telecallerId: string;
+  name: string;
+  email: string;
+  phone: string;
+  role: 'telecaller';
+  isActive: boolean;
+  assignedBranch?: string;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TelecallerActivity {
+  id?: string;
+  activityId?: string;
+  telecallerUid?: string;
+  telecallerId: string;
+  telecallerName: string;
+  patientId: string;
+  patientName: string;
+  patientMobile: string;
+  branchId: string;
+  branchName: string;
+  activityType: 'call_logged' | 'status_updated' | 'rescheduled' | 'appointment_booked' | 'remark_added';
+  previousStatus?: string;
+  newStatus?: string;
+  callOutcome?: string;
+  remarks?: string;
+  followUpId?: string;
+  appointmentId?: string;
+  appointmentDate?: string;
+  nextFollowUpDate?: string;
+  createdAt: string;
+  createdAtMs: number;
+}
+
+export const DEFAULT_TELECALLERS = [
+  {
+    id: "telecaller_TC01",
+    telecallerId: "TC01",
+    name: "Telecaller Desk",
+    email: "telecaller@sph.com",
+    phone: "9000012345",
+    role: "telecaller" as const,
+    isActive: true,
+    assignedBranch: "All Branches",
+    password: "email123",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z"
+  }
+];
 
 export interface Remedy {
   id?: string;

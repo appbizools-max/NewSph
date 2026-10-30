@@ -112,14 +112,11 @@ export const MediaManagerPage: React.FC<MediaManagerPageProps> = () => {
     }
   };
 
-  // Handle Add URL inside folder (ONLY NAME & URL)
+  // Handle Add URL inside folder (ONLY WEB LINK)
   const handleAddUrl = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!urlName.trim()) {
-      setUrlError('Please enter a name for this URL.');
-      return;
-    }
-    if (!urlLink.trim()) {
+    const cleanUrl = urlLink.trim();
+    if (!cleanUrl) {
       setUrlError('Please enter the URL link.');
       return;
     }
@@ -131,9 +128,9 @@ export const MediaManagerPage: React.FC<MediaManagerPageProps> = () => {
       await addClinicMediaItem({
         folderId: currentFolder?.id || 'root',
         folderName: currentFolder?.name || 'General',
-        title: urlName.trim(),
+        title: cleanUrl,
         type: 'url',
-        url: urlLink.trim(),
+        url: cleanUrl,
         category: 'lab_reports',
         recordDate: new Date().toISOString().split('T')[0],
         uploadedBy: 'Staff'
@@ -808,37 +805,16 @@ export const MediaManagerPage: React.FC<MediaManagerPageProps> = () => {
             )}
 
             <form onSubmit={handleAddUrl}>
-              {/* Field 1: Name */}
-              <div style={{ marginBottom: '14px' }}>
-                <label style={{ display: 'block', fontSize: '13px', fontWeight: 700, color: '#334155', marginBottom: '6px' }}>
-                  Name
-                </label>
-                <input
-                  type="text"
-                  autoFocus
-                  required
-                  placeholder="e.g. Brain MRI Scan / Blood Report / Patient Drive"
-                  value={urlName}
-                  onChange={(e) => setUrlName(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '9px 12px',
-                    borderRadius: '8px',
-                    border: '1px solid #cbd5e1',
-                    fontSize: '13px'
-                  }}
-                />
-              </div>
-
-              {/* Field 2: URL */}
+              {/* Only Field: Web Link (URL) */}
               <div style={{ marginBottom: '20px' }}>
                 <label style={{ display: 'block', fontSize: '13px', fontWeight: 700, color: '#334155', marginBottom: '6px' }}>
-                  URL Link
+                  Web Link (URL) *
                 </label>
                 <input
                   type="url"
+                  autoFocus
                   required
-                  placeholder="https://drive.google.com/... or any URL"
+                  placeholder="https://drive.google.com/... or any web link"
                   value={urlLink}
                   onChange={(e) => setUrlLink(e.target.value)}
                   style={{

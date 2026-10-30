@@ -67,6 +67,7 @@ export const ReceptionSideDrawer: React.FC<ReceptionSideDrawerProps> = ({
     return [
       { id: 'reception_dashboard', label: 'Dashboard' },
       { id: 'reception_book', label: 'Book Appointment' },
+      { id: 'reception_reback', label: 'Reback Appointment' },
       { id: 'reception_patients', label: 'All Patients' },
       { id: 'reception_followups', label: 'Follow Ups' },
       { id: 'reception_medicines', label: 'Medicine Requests' },

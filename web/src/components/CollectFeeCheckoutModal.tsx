@@ -151,6 +151,8 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
   onClose,
   onSuccess
 }) => {
+  const isRebackVisit = (appointment as any)?.isReback === true || (appointment as any)?.rebackVisit === true;
+
   // ---------------- STATE ----------------
   const [showPatientDetails, setShowPatientDetails] = useState(false);
   const [targetAmount, setTargetAmount] = useState<number>(0);
@@ -481,7 +483,7 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
       } else if (cFee > 0) {
         computedTarget = cFee;
       } else {
-        computedTarget = 1000;
+        computedTarget = 0;
       }
 
       setDietFeeInput(dFee);
@@ -523,7 +525,7 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
         setPaymentTypePreset('consultation');
         setIncludeConsultFee(true);
         setIncludeMedicineFee(false);
-        setConsultFeeInput(computedTarget > 0 ? computedTarget : 500);
+        setConsultFeeInput(computedTarget > 0 ? computedTarget : 0);
         setMedicineFeeInput(0);
         setMedicineItems([]);
       }
@@ -1044,6 +1046,7 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
   const [copiedLink, setCopiedLink] = useState<boolean>(false);
 
   const generateUpiQr = async (forceAmount?: number) => {
+    if (isRebackVisit) return;
     const amt = typeof forceAmount === 'number' ? forceAmount : totalAmountDue;
     if (amt <= 0) return;
     setUpiQrLoading(true);
@@ -1109,7 +1112,7 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
           clearInterval(interval);
           handleConfirmCheckout();
         }
-      } catch (_) {}
+      } catch (_) { }
     }, 4000);
     return () => clearInterval(interval);
   }, [selectedPaymentMode, upiQrData?.qrId, upiQrPaid]);
@@ -1175,12 +1178,13 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
           setSplitUpiQrPaid(true);
           clearInterval(interval);
         }
-      } catch (_) {}
+      } catch (_) { }
     }, 4000);
     return () => clearInterval(interval);
   }, [isSplitUpi, splitUpiQrData?.qrId, splitUpiQrPaid]);
 
   const handleLaunchCardCheckout = async (targetAmt?: number) => {
+    if (isRebackVisit) return;
     const amt = typeof targetAmt === 'number' ? targetAmt : (selectedPaymentMode === 'Card' ? totalAmountDue : splitCardAmount);
     if (amt <= 0) {
       alert('Please enter a valid amount for Card payment.');
@@ -1273,7 +1277,6 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
       await updateDoc(doc(db, 'allpatients', targetId), updatePayload).catch(() => { });
       await updateDoc(doc(db, 'patients', targetId), updatePayload).catch(() => { });
 
-      // Send Push & In-App Notification to HR & Admin
       createFeeDiscountRequestNotificationInFirestore({
         patientName: patientName,
         patientPhone: patientPhone,
@@ -1283,7 +1286,6 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
         reason: discountReason.trim(),
         appointmentId: targetId
       }).catch(() => { });
-
       alert('✓ Discount request successfully submitted to HR for approval!\n\nStatus is currently PENDING. The discount will only be applied to the bill once HR reviews and approves.');
     } catch (err: any) {
       console.error('Error submitting discount request:', err);
@@ -1323,13 +1325,11 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
         }
       }
     }
-
     // 2. Pending HR Discount Block (Cannot skip or complete payment while pending HR approval)
     if (discountRequestStatus === 'pending') {
       alert(`⛔ Cannot Complete Payment\n\nA discount request of ₹${requestedDiscountAmount || '...'} is currently pending HR approval.\n\nPayment cannot be completed until HR accepts or rejects this discount request.`);
       return;
     }
-
     setIsLoading(true);
     const finalPaymentMode =
       totalAmountDue === 0
@@ -1337,7 +1337,6 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
         : selectedPaymentMode === 'Split'
           ? `Split (${splitMethod1} ₹${Number(splitAmount1) || 0} + ${splitMethod2} ₹${Number(splitAmount2) || 0})`
           : selectedPaymentMode;
-
     const payload: any = {
       status: 'completed',
       paymentStatus: 'paid',
@@ -1423,6 +1422,54 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
       payload.isFollowUp = true;
     }
 
+    const isRebackVisit = Boolean(
+      (appointment as any)?.isReback ||
+      (appointment as any)?.rebackVisit ||
+      (appointment as any)?.historicalVisitDate
+    );
+    const histDate = (appointment as any)?.appointmentDate || (appointment as any)?.date || (appointment as any)?.historicalVisitDate || null;
+
+    let effectiveRevenueDate = new Date().toISOString();
+    let effectiveRevenueDateStr = histDate || null;
+    let isCurrentMonthForRevenue = true;
+
+    if (isRebackVisit && histDate) {
+      const str = String(histDate).trim();
+      let y = 0, m = 0, d = 0;
+      if (str.includes('T')) {
+        const parsed = new Date(str);
+        if (!isNaN(parsed.getTime())) {
+          y = parsed.getFullYear();
+          m = parsed.getMonth();
+          d = parsed.getDate();
+        }
+      }
+      if (!y) {
+        const parts = str.split(/[-/]/);
+        if (parts.length === 3) {
+          if (parts[2].length === 4) {
+            d = parseInt(parts[0], 10);
+            m = parseInt(parts[1], 10) - 1;
+            y = parseInt(parts[2], 10);
+          } else if (parts[0].length === 4) {
+            y = parseInt(parts[0], 10);
+            m = parseInt(parts[1], 10) - 1;
+            d = parseInt(parts[2], 10);
+          }
+        }
+      }
+      if (y > 1970 && !isNaN(m) && !isNaN(d)) {
+        const bookedObj = new Date(y, m, d, 12, 0, 0);
+        effectiveRevenueDate = bookedObj.toISOString();
+        effectiveRevenueDateStr = `${String(d).padStart(2, '0')}-${String(m + 1).padStart(2, '0')}-${y}`;
+        isCurrentMonthForRevenue = effectiveRevenueDate.slice(0, 7) === new Date().toISOString().slice(0, 7);
+      }
+    }
+
+    if (isRebackVisit) {
+      payload.paymentCollectedAt = effectiveRevenueDate;
+    }
+
     try {
       await updateDoc(doc(db, 'appointments', appointment.id), payload).catch(() => { });
       await updateDoc(doc(db, 'allpatients', appointment.id), payload).catch(() => { });
@@ -1449,18 +1496,25 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
           revenueSplit: paymentTypePreset === 'package' ? 'Package' : (activeMedicineFee > 0 ? 'Consultation & Medicine Fee' : 'Consultation'),
           source: (appointment as any).marketingSource || (appointment as any).source || 'Walk-in',
           status: 'PAID',
-          createdAt: new Date().toISOString(),
-          paymentCollectedAt: new Date().toISOString()
+          isReback: isRebackVisit,
+          rebackVisit: isRebackVisit,
+          historicalVisitDate: effectiveRevenueDateStr,
+          date: effectiveRevenueDateStr,
+          appointmentDate: effectiveRevenueDateStr,
+          timestamp: effectiveRevenueDate,
+          createdAt: effectiveRevenueDate,
+          paymentCollectedAt: effectiveRevenueDate,
+          actualRecordedAt: new Date().toISOString()
         }).catch(() => { });
       }
 
       // Atomically increment branch target reached in real-time
-      if (totalAmountDue > 0 && db) {
+      if (totalAmountDue > 0 && db && (!isRebackVisit || isCurrentMonthForRevenue)) {
         const rawBranch = String(appointment.branch || appointment.branchName || 'kphb').toLowerCase();
         const bKey = rawBranch.includes('nalla') ? 'nallagandla'
           : rawBranch.includes('dilshuk') ? 'dilshuknagar'
-          : rawBranch.includes('chanda') ? 'chandanagar'
-          : 'kphb';
+            : rawBranch.includes('chanda') ? 'chandanagar'
+              : 'kphb';
 
         updateDoc(doc(db, 'branchTargets', bKey), {
           targetReached: increment(totalAmountDue),
@@ -1588,8 +1642,8 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
         webInvoiceItems.push({ description: 'Homeopathy Clinical Consultation & Care', amount: totalAmountDue });
       }
 
-      // Trigger Leonas WhatsApp Invoice / Payment Receipt Notification
-      if (totalAmountDue > 0) {
+      // Trigger Leonas WhatsApp Invoice / Payment Receipt Notification (EXCLUDED for Reback Appointments)
+      if (totalAmountDue > 0 && !isRebackVisit) {
         sendInvoiceWhatsAppNotification({
           patientName: appointment.patientName || appointment.name || 'Patient',
           phone: appointment.phone || appointment.phoneNumber || '',
@@ -1602,8 +1656,8 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
         }).then(res => {
           const generatedPdfUrl = (res as any)?.pdfUrl;
           if (generatedPdfUrl && db) {
-            updateDoc(doc(db, 'appointments', appointment.id), { invoicePdfUrl: generatedPdfUrl }).catch(() => {});
-            updateDoc(doc(db, 'allpatients', appointment.id), { invoicePdfUrl: generatedPdfUrl }).catch(() => {});
+            updateDoc(doc(db, 'appointments', appointment.id), { invoicePdfUrl: generatedPdfUrl }).catch(() => { });
+            updateDoc(doc(db, 'allpatients', appointment.id), { invoicePdfUrl: generatedPdfUrl }).catch(() => { });
           }
         }).catch(err => console.error('WhatsApp invoice notification error:', err));
 
@@ -2874,8 +2928,8 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
               })}
             </div>
 
-            {/* Dynamic Razorpay UPI QR Code Card */}
-            {selectedPaymentMode === 'UPI / QR Code' && totalAmountDue > 0 && (
+            {/* Dynamic Razorpay UPI QR Code Card (EXCLUDED for Reback Appointments) */}
+            {selectedPaymentMode === 'UPI / QR Code' && totalAmountDue > 0 && !isRebackVisit && (
               <div style={{
                 marginTop: '12px',
                 marginBottom: '12px',
@@ -4077,14 +4131,14 @@ export const CollectFeeCheckoutModal: React.FC<CollectFeeCheckoutModalProps> = (
                         ? `
                             ${Number(activeInvoice.consultationFee) > 0 ? `<tr><td>Consultation Fee</td><td style="text-align: right;">₹${Number(activeInvoice.consultationFee).toFixed(2)}</td></tr>` : ''}
                             ${activeInvoice.medicines && activeInvoice.medicines.length > 0
-                              ? activeInvoice.medicines.map((m: any, idx: number) => {
-                                const medName = m.name && m.name.trim() ? m.name.trim() : (activeInvoice.medicines.length === 1 ? 'Medicine Fee' : `Medicine ${idx + 1}`);
-                                const typeDisplay = m.type && m.type.trim() ? ` [${m.type.trim()}]` : '';
-                                const timingDisplay = m.timing && m.timing.trim() ? ` [${m.timing.trim()}]` : '';
-                                const durationDisplay = activeInvoice.medicineDuration ? ` (${activeInvoice.medicineDuration})` : '';
-                                return `<tr><td>${medName}${typeDisplay}${timingDisplay}${durationDisplay}</td><td style="text-align: right;">₹${Number(m.amount).toFixed(2)}</td></tr>`;
-                              }).join('')
-                              : (Number(activeInvoice.medicineFee) > 0 ? `<tr><td>Medicine Fee${activeInvoice.medicineDuration ? ` (${activeInvoice.medicineDuration})` : ''}</td><td style="text-align: right;">₹${Number(activeInvoice.medicineFee).toFixed(2)}</td></tr>` : '')}
+                          ? activeInvoice.medicines.map((m: any, idx: number) => {
+                            const medName = m.name && m.name.trim() ? m.name.trim() : (activeInvoice.medicines.length === 1 ? 'Medicine Fee' : `Medicine ${idx + 1}`);
+                            const typeDisplay = m.type && m.type.trim() ? ` [${m.type.trim()}]` : '';
+                            const timingDisplay = m.timing && m.timing.trim() ? ` [${m.timing.trim()}]` : '';
+                            const durationDisplay = activeInvoice.medicineDuration ? ` (${activeInvoice.medicineDuration})` : '';
+                            return `<tr><td>${medName}${typeDisplay}${timingDisplay}${durationDisplay}</td><td style="text-align: right;">₹${Number(m.amount).toFixed(2)}</td></tr>`;
+                          }).join('')
+                          : (Number(activeInvoice.medicineFee) > 0 ? `<tr><td>Medicine Fee${activeInvoice.medicineDuration ? ` (${activeInvoice.medicineDuration})` : ''}</td><td style="text-align: right;">₹${Number(activeInvoice.medicineFee).toFixed(2)}</td></tr>` : '')}
                           `
                         : `
                             ${Number(activeInvoice.consultationFee) > 0 ? `<tr><td>Consultation Fee</td><td style="text-align: right;">₹${Number(activeInvoice.consultationFee).toFixed(2)}</td></tr>` : ''}
